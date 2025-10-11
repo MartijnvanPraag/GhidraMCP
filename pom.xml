@@ -8,7 +8,7 @@
   <packaging>jar</packaging>
   <version>dev</version>
   <name>GhidraMCP</name>
-  <url>https://github.com/federation-university/GhidraMCP</url>
+  <url>https://github.com/martijnvanpraag/GhidraMCP</url>
   
   <properties>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
@@ -160,7 +160,7 @@
               <Plugin-Class>au.federation.ghidra.GhidraMCP</Plugin-Class>
               <Plugin-Name>GhidraMCP</Plugin-Name>
               <Plugin-Version>${git.commit.id.abbrev}-${maven.build.timestamp}</Plugin-Version>
-              <Plugin-Author>LaurieWired, Teal Bauer</Plugin-Author>
+              <Plugin-Author>LaurieWired, Teal Bauer, Martijn van Praag</Plugin-Author>
               <Plugin-Description>Expose multiple Ghidra tools to MCP servers with variable management</Plugin-Description>
             </manifestEntries>
           </archive>
