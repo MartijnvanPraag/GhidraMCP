@@ -280,7 +280,7 @@ async def test_mcp_data_operations():
     """Test data operations using the MCP bridge."""
     server_parameters = StdioServerParameters(
         command=sys.executable,
-        args=["bridge_mcp_hydra.py"],
+        args=["ghidra_mcp_server.py"],
     )
     
     logger.info("Connecting to MCP bridge...")
@@ -416,3 +416,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

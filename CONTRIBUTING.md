@@ -22,7 +22,7 @@ GhidraMCP consists of two main components:
    - Data models: `model/` directory
    - Utilities: `util/` directory
 
-2. **Python MCP Bridge** (`bridge_mcp_hydra.py`):
+2. **Python MCP Bridge** (`ghidra_mcp_server.py`):
    - Implements the Model Context Protocol (MCP)
    - Connects AI assistants to the Ghidra plugin via HTTP
 
@@ -86,7 +86,7 @@ When making changes, update version numbers in these locations:
    public static final String PLUGIN_VERSION = "v2.0.0-beta.1";
    ```
 
-2. **Bridge Version** in `bridge_mcp_hydra.py`:
+2. **Bridge Version** in `ghidra_mcp_server.py`:
    ```python
    BRIDGE_VERSION = "v2.0.0-beta.1"
    ```
@@ -100,7 +100,7 @@ The API version is tracked separately from the implementation version:
    public static final int API_VERSION = 2;
    ```
 
-2. **Required API Version** in `bridge_mcp_hydra.py`:
+2. **Required API Version** in `ghidra_mcp_server.py`:
    ```python
    REQUIRED_API_VERSION = 2
    ```
@@ -114,7 +114,7 @@ The API version is tracked separately from the implementation version:
 
 ### Important Versioning Rules
 
-1. **Bridge Modifications**: When modifying the MCP bridge script (`bridge_mcp_hydra.py`), update the `BRIDGE_VERSION` string but only update the `REQUIRED_API_VERSION` if the changes require API compatibility changes.
+1. **Bridge Modifications**: When modifying the MCP bridge script (`ghidra_mcp_server.py`), update the `BRIDGE_VERSION` string but only update the `REQUIRED_API_VERSION` if the changes require API compatibility changes.
 
 2. **Java Plugin Modifications**: When making changes to the Java plugin:
    - Update `PLUGIN_VERSION` string for all changes
@@ -205,7 +205,7 @@ Closes #123
    - Ensure all tests pass
    - Update version numbers in:
      - `src/main/java/au/federation/ghidra/api/ApiConstants.java`
-     - `bridge_mcp_hydra.py`
+     - `ghidra_mcp_server.py`
    - Update CHANGELOG.md with release notes
    - Move content from "Unreleased" section to a new release section
    - Merge all changes to the main branch
@@ -245,3 +245,4 @@ If you have questions or need help, please:
 3. Reach out to the maintainers directly
 
 Thank you for contributing to GhidraMCP!
+

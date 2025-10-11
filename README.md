@@ -228,7 +228,7 @@ client.use_tool("ghydra", "discover_instances", {"host": "192.168.1.10"})  # Cus
       "command": "uv",
       "args": [
         "run",
-        "/ABSOLUTE_PATH_TO/bridge_mcp_hydra.py"
+        "/ABSOLUTE_PATH_TO/ghidra_mcp_server.py"
       ],
       "env": {
         "GHIDRA_HYDRA_HOST": "localhost"  // Optional - defaults to localhost
@@ -243,7 +243,7 @@ client.use_tool("ghydra", "discover_instances", {"host": "192.168.1.10"})  # Cus
 ### 5ire Configuration
 1. Tool Key: ghydra  
 2. Name: GhidraMCP
-3. Command: `uv run /ABSOLUTE_PATH_TO/bridge_mcp_hydra.py`
+3. Command: `uv run /ABSOLUTE_PATH_TO/ghidra_mcp_server.py`
 
 ## Example Session
 

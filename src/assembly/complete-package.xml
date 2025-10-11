@@ -15,7 +15,7 @@
         <fileSet>
             <directory>${project.basedir}</directory>
             <includes>
-                <include>bridge_mcp_hydra.py</include>
+                <include>ghidra_mcp_server.py</include>
                 <include>README.md</include>
                 <include>LICENSE</include>
             </includes>
@@ -32,3 +32,4 @@
         </file>
     </files>
 </assembly>
+
