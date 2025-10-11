@@ -1,0 +1,305 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>au.federation.ghidra</groupId>
+  <artifactId>GhidraMCP</artifactId>
+  <packaging>jar</packaging>
+  <version>dev</version>
+  <name>GhidraMCP</name>
+  <url>https://github.com/federation-university/GhidraMCP</url>
+  
+  <properties>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+    <ghidra.jar.location>${project.basedir}/lib</ghidra.jar.location>
+    <maven.deploy.skip>true</maven.deploy.skip>
+    <maven.install.skip>true</maven.install.skip>
+    <maven.build.timestamp.format>yyyyMMdd-HHmmss</maven.build.timestamp.format>
+    <revision>dev</revision>
+    <inner.zip.filename>GhidraMCP-${git.commit.id.describe}-${maven.build.timestamp}.zip</inner.zip.filename>
+  </properties>
+
+  <dependencies>
+    <!-- JSON handling -->
+    <dependency>
+      <groupId>com.google.code.gson</groupId>
+      <artifactId>gson</artifactId>
+      <version>2.10.1</version>
+      <scope>provided</scope>
+    </dependency>
+
+    <!-- Ghidra JARs as system-scoped dependencies -->
+    <dependency>
+      <groupId>ghidra</groupId>
+      <artifactId>Generic</artifactId>
+      <version>11.3.1</version>
+      <scope>system</scope>
+      <systemPath>${ghidra.jar.location}/Generic.jar</systemPath>
+    </dependency>
+    <dependency>
+      <groupId>ghidra</groupId>
+      <artifactId>SoftwareModeling</artifactId>
+      <version>11.3.1</version>
+      <scope>system</scope>
+      <systemPath>${ghidra.jar.location}/SoftwareModeling.jar</systemPath>
+    </dependency>
+    <dependency>
+      <groupId>ghidra</groupId>
+      <artifactId>Project</artifactId>
+      <version>11.3.1</version>
+      <scope>system</scope>
+      <systemPath>${ghidra.jar.location}/Project.jar</systemPath>
+    </dependency>
+    <dependency>
+      <groupId>ghidra</groupId>
+      <artifactId>Docking</artifactId>
+      <version>11.3.1</version>
+      <scope>system</scope>
+      <systemPath>${ghidra.jar.location}/Docking.jar</systemPath>
+    </dependency>
+    <dependency>
+      <groupId>ghidra</groupId>
+      <artifactId>Decompiler</artifactId>
+      <version>11.3.1</version>
+      <scope>system</scope>
+      <systemPath>${ghidra.jar.location}/Decompiler.jar</systemPath>
+    </dependency>
+    <dependency>
+      <groupId>ghidra</groupId>
+      <artifactId>Utility</artifactId>
+      <version>11.3.1</version>
+      <scope>system</scope>
+      <systemPath>${ghidra.jar.location}/Utility.jar</systemPath>
+    </dependency>
+    <dependency>
+      <groupId>ghidra</groupId>
+      <artifactId>Base</artifactId>
+      <version>11.3.1</version>
+      <scope>system</scope>
+      <systemPath>${ghidra.jar.location}/Base.jar</systemPath>
+    </dependency>
+    
+    <!-- Test dependencies -->
+    <dependency>
+      <groupId>junit</groupId>
+      <artifactId>junit</artifactId>
+      <version>4.13.2</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <resources>
+      <resource>
+        <directory>src/main/resources</directory>
+        <filtering>true</filtering>
+      </resource>
+    </resources>
+    <plugins>
+      <!-- Set Java version -->
+      <!-- Resources plugin to handle filtering -->
+      <!-- <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-resources-plugin</artifactId>
+        <version>3.3.1</version>
+        <configuration>
+          <encoding>UTF-8</encoding>
+        </configuration>
+      </plugin> -->
+      
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>3.8.1</version>
+        <configuration>
+          <source>21</source>
+          <target>21</target>
+          <compilerArgument>-Xlint:-path</compilerArgument>
+        </configuration>
+      </plugin>
+      
+      <!-- Git Commit ID plugin to generate version info -->
+      <plugin>
+        <groupId>io.github.git-commit-id</groupId>
+        <artifactId>git-commit-id-maven-plugin</artifactId>
+        <version>9.0.1</version>
+        <executions>
+          <execution>
+            <id>get-git-info</id>
+            <phase>initialize</phase>
+            <goals>
+              <goal>revision</goal>
+            </goals>
+          </execution>
+        </executions>
+        <configuration>
+          <gitDescribe>
+            <tags>true</tags>
+          </gitDescribe>
+          <generateGitPropertiesFile>true</generateGitPropertiesFile>
+          <generateGitPropertiesFilename>${project.build.outputDirectory}/git.properties</generateGitPropertiesFilename>
+          <commitIdGenerationMode>full</commitIdGenerationMode>
+        </configuration>
+      </plugin>
+      
+      
+      <!-- Use custom MANIFEST.MF -->
+      <plugin>
+        <artifactId>maven-jar-plugin</artifactId>
+        <version>3.2.2</version>
+        <configuration>
+          <archive>
+            <manifest>
+              <addDefaultImplementationEntries>false</addDefaultImplementationEntries>
+            </manifest>
+            <manifestEntries>
+              <Implementation-Title>GhidraMCP</Implementation-Title>
+              <Implementation-Version>${git.commit.id.abbrev}-${maven.build.timestamp}</Implementation-Version>
+              <Plugin-Class>au.federation.ghidra.GhidraMCP</Plugin-Class>
+              <Plugin-Name>GhidraMCP</Plugin-Name>
+              <Plugin-Version>${git.commit.id.abbrev}-${maven.build.timestamp}</Plugin-Version>
+              <Plugin-Author>LaurieWired, Teal Bauer</Plugin-Author>
+              <Plugin-Description>Expose multiple Ghidra tools to MCP servers with variable management</Plugin-Description>
+            </manifestEntries>
+          </archive>
+          <finalName>GhidraMCP</finalName>
+          <excludes>
+            <exclude>**/App.class</exclude>
+          </excludes>
+          <outputDirectory>${project.build.directory}</outputDirectory>
+        </configuration>
+      </plugin>
+      
+      <!-- The Assembly Plugin -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-assembly-plugin</artifactId>
+        <version>3.3.0</version>
+        <executions>
+          <!-- Execution for the Ghidra extension zip -->
+          <execution>
+            <id>plugin-assembly</id>
+            <phase>package</phase> 
+            <goals>
+              <goal>single</goal>
+            </goals>
+            <configuration>
+              <descriptors>
+                <descriptor>src/assembly/ghidra-extension.xml</descriptor>
+              </descriptors>
+              <finalName>GhidraMCP-${git.commit.id.describe}-${maven.build.timestamp}</finalName>
+              <appendAssemblyId>false</appendAssemblyId>
+            </configuration>
+          </execution>
+          
+          <!-- Execution for the complete package -->
+          <execution>
+            <id>complete-package</id>
+            <phase>package</phase> 
+            <goals>
+              <goal>single</goal>
+            </goals>
+            <configuration>
+              <descriptors>
+                <descriptor>src/assembly/complete-package.xml</descriptor>
+              </descriptors>
+              <finalName>GhidraMCP-Complete-${git.commit.id.describe}-${maven.build.timestamp}</finalName>
+              <appendAssemblyId>false</appendAssemblyId>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+      
+      <!-- Copy dependencies and validate system paths -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-dependency-plugin</artifactId>
+        <version>3.6.1</version>
+        <executions>
+          <!-- Copy dependencies to target/lib for the assembly -->
+          <execution>
+            <id>copy-dependencies</id>
+            <phase>prepare-package</phase>
+            <goals>
+              <goal>copy-dependencies</goal>
+            </goals>
+            <configuration>
+              <outputDirectory>${project.build.directory}/lib</outputDirectory>
+              <includeScope>runtime</includeScope>
+            </configuration>
+          </execution>
+          
+          <!-- Validate system dependency paths -->
+          <execution>
+            <id>validate-system-dependencies</id>
+            <phase>validate</phase>
+            <goals>
+              <goal>analyze-only</goal>
+            </goals>
+            <configuration>
+              <failOnWarning>false</failOnWarning>
+              <ignoredUnusedDeclaredDependencies>
+                <ignoredUnusedDeclaredDependency>ghidra:Generic</ignoredUnusedDeclaredDependency>
+                <ignoredUnusedDeclaredDependency>ghidra:SoftwareModeling</ignoredUnusedDeclaredDependency>
+                <ignoredUnusedDeclaredDependency>ghidra:Project</ignoredUnusedDeclaredDependency>
+                <ignoredUnusedDeclaredDependency>ghidra:Docking</ignoredUnusedDeclaredDependency>
+                <ignoredUnusedDeclaredDependency>ghidra:Decompiler</ignoredUnusedDeclaredDependency>
+                <ignoredUnusedDeclaredDependency>ghidra:Utility</ignoredUnusedDeclaredDependency>
+                <ignoredUnusedDeclaredDependency>ghidra:Base</ignoredUnusedDeclaredDependency>
+                <ignoredUnusedDeclaredDependency>junit:junit</ignoredUnusedDeclaredDependency>
+              </ignoredUnusedDeclaredDependencies>
+              <ignoredSystemDependencies>
+                <ignoredSystemDependency>ghidra:*</ignoredSystemDependency>
+              </ignoredSystemDependencies>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+  
+  <profiles>
+    <!-- Profile for building just the Ghidra plugin -->
+    <profile>
+      <id>plugin-only</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-assembly-plugin</artifactId>
+            <version>3.3.0</version>
+            <executions>
+              <execution>
+                <id>complete-package</id>
+                <phase>none</phase>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+    
+    <!-- Profile for building just the complete package -->
+    <profile>
+      <id>complete-only</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-assembly-plugin</artifactId>
+            <version>3.3.0</version>
+            <executions>
+              <execution>
+                <id>plugin-assembly</id>
+                <phase>none</phase>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
+</project>
+
