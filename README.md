@@ -1,10 +1,4 @@
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
-[![GitHub release (latest by date)](https://img.shields.io/github/v/release/teal-bauer/GhidraMCP)](https://github.com/teal-bauer/GhidraMCP/releases)
-[![API Version](https://img.shields.io/badge/API-v2.0-orange)](https://github.com/teal-bauer/GhidraMCP/blob/main/GHIDRA_HTTP_API.md)
-[![GitHub stars](https://img.shields.io/github/stars/teal-bauer/GhidraMCP)](https://github.com/teal-bauer/GhidraMCP/stargazers)
-[![GitHub forks](https://img.shields.io/github/forks/teal-bauer/GhidraMCP)](https://github.com/teal-bauer/GhidraMCP/network/members)
-[![GitHub contributors](https://img.shields.io/github/contributors/teal-bauer/GhidraMCP)](https://github.com/teal-bauer/GhidraMCP/graphs/contributors)
-[![Build Status](https://github.com/teal-bauer/GhidraMCP/actions/workflows/build.yml/badge.svg)](https://github.com/teal-bauer/GhidraMCP/actions/workflows/build.yml)
 
 # GhidraMCP v2.0
 
@@ -116,7 +110,7 @@ GhidraMCP version 2.0 provides a comprehensive set of reverse engineering capabi
 - MCP [SDK](https://github.com/modelcontextprotocol/python-sdk)
 
 ## Ghidra
-First, download the latest [release](https://github.com/teal-bauer/GhidraMCP/releases) from this repository. The "Complete" artifact contains the zipped Ghidra plugin and the Python MCP bridge. Unpack the outer archive, then, add the plugin to Ghidra:
+First, download the latest [release](https://github.com/martijnvanpraag/GhidraMCP/releases) from this repository. The "Complete" artifact contains the zipped Ghidra plugin and the Python MCP bridge. Unpack the outer archive, then, add the plugin to Ghidra:
 
 1. Run Ghidra
 2. Select `File` -> `Install Extensions`

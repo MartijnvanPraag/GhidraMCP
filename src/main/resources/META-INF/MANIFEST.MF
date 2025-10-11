@@ -1,8 +1,8 @@
 Manifest-Version: 1.0
 Plugin-Class: au.federation.ghidra.GhidraMCP
 Plugin-Name: GhidraMCP
-Plugin-Version: 11.3.1
+Plugin-Version: 11.4.2
 Bundle-Version: dev-SNAPSHOT
-Plugin-Author: LaurieWired, Teal Bauer
+Plugin-Author: LaurieWired, Teal Bauer, Martijn van Praag
 Plugin-Description: Expose multiple Ghidra tools to MCP servers with variable management
 

@@ -34,49 +34,49 @@
     <dependency>
       <groupId>ghidra</groupId>
       <artifactId>Generic</artifactId>
-      <version>11.3.1</version>
+      <version>11.4.2</version>
       <scope>system</scope>
       <systemPath>${ghidra.jar.location}/Generic.jar</systemPath>
     </dependency>
     <dependency>
       <groupId>ghidra</groupId>
       <artifactId>SoftwareModeling</artifactId>
-      <version>11.3.1</version>
+      <version>11.4.2</version>
       <scope>system</scope>
       <systemPath>${ghidra.jar.location}/SoftwareModeling.jar</systemPath>
     </dependency>
     <dependency>
       <groupId>ghidra</groupId>
       <artifactId>Project</artifactId>
-      <version>11.3.1</version>
+      <version>11.4.2</version>
       <scope>system</scope>
       <systemPath>${ghidra.jar.location}/Project.jar</systemPath>
     </dependency>
     <dependency>
       <groupId>ghidra</groupId>
       <artifactId>Docking</artifactId>
-      <version>11.3.1</version>
+      <version>11.4.2</version>
       <scope>system</scope>
       <systemPath>${ghidra.jar.location}/Docking.jar</systemPath>
     </dependency>
     <dependency>
       <groupId>ghidra</groupId>
       <artifactId>Decompiler</artifactId>
-      <version>11.3.1</version>
+      <version>11.4.2</version>
       <scope>system</scope>
       <systemPath>${ghidra.jar.location}/Decompiler.jar</systemPath>
     </dependency>
     <dependency>
       <groupId>ghidra</groupId>
       <artifactId>Utility</artifactId>
-      <version>11.3.1</version>
+      <version>11.4.2</version>
       <scope>system</scope>
       <systemPath>${ghidra.jar.location}/Utility.jar</systemPath>
     </dependency>
     <dependency>
       <groupId>ghidra</groupId>
       <artifactId>Base</artifactId>
-      <version>11.3.1</version>
+      <version>11.4.2</version>
       <scope>system</scope>
       <systemPath>${ghidra.jar.location}/Base.jar</systemPath>
     </dependency>

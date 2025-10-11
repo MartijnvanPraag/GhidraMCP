@@ -114,11 +114,3 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 - Initial project setup
 - Basic MCP bridge functionality
-
-[unreleased]: https://github.com/teal-bauer/GhidraMCP/compare/v1.4.0...HEAD
-[1.4.0]: https://github.com/teal-bauer/GhidraMCP/compare/v1.3.0...v1.4.0
-[1.3.0]: https://github.com/teal-bauer/GhidraMCP/compare/v1.2...v1.3.0
-[1.2]: https://github.com/teal-bauer/GhidraMCP/compare/v1.1...v1.2
-[1.1]: https://github.com/teal-bauer/GhidraMCP/compare/1.0...v1.1
-[1.0]: https://github.com/teal-bauer/GhidraMCP/releases/tag/1.0
-
