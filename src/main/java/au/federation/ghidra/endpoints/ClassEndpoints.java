@@ -15,21 +15,8 @@ package au.federation.ghidra.endpoints;
 
     public class ClassEndpoints extends AbstractEndpoint {
 
-        private PluginTool tool;
-        
-        // Updated constructor to accept port
-        public ClassEndpoints(Program program, int port) {
-            super(program, port); // Call super constructor
-        }
-        
-        public ClassEndpoints(Program program, int port, PluginTool tool) {
-            super(program, port);
-            this.tool = tool;
-        }
-        
-        @Override
-        protected PluginTool getTool() {
-            return tool;
+        public ClassEndpoints(au.federation.ghidra.PluginState pluginState) {
+            super(pluginState);
         }
 
         @Override
@@ -105,7 +92,7 @@ package au.federation.ghidra.endpoints;
                     // so we can't apply pagination directly to sorted list
                     
                     // Build response with HATEOAS links
-                    ResponseBuilder builder = new ResponseBuilder(exchange, port)
+                    ResponseBuilder builder = new ResponseBuilder(exchange, getPort())
                         .success(true)
                         .result(paginatedClasses);
                     

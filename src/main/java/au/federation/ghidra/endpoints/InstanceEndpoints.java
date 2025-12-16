@@ -5,6 +5,7 @@ package au.federation.ghidra.endpoints;
     import com.sun.net.httpserver.HttpServer;
     import au.federation.ghidra.api.ResponseBuilder;
     import au.federation.ghidra.GhidraMCPPlugin; // Need access to activeInstances
+    import au.federation.ghidra.GhidraMCPHeadlessScript; // Need access for headless mode
     import ghidra.program.model.listing.Program;
     import ghidra.util.Msg;
 
@@ -13,18 +14,12 @@ package au.federation.ghidra.endpoints;
 
     public class InstanceEndpoints extends AbstractEndpoint {
 
-        // Need a way to access the static activeInstances map from GhidraMCPPlugin
-        // This is a bit awkward and suggests the instance management might need
-        // a different design, perhaps a dedicated manager class.
-        // For now, we pass the map or use a static accessor if made public.
-        private final Map<Integer, GhidraMCPPlugin> activeInstances; 
-        // Note: Passing currentProgram might be null here if no program is open.
-        // The constructor in AbstractEndpoint handles null program.
+        // Support both Plugin and Headless Script instances
+        // Note: activeInstances is accessed from GhidraMCPPlugin.activeInstances and GhidraMCPHeadlessScript.activeInstances
 
-        // Updated constructor to accept port
-        public InstanceEndpoints(Program program, int port, Map<Integer, GhidraMCPPlugin> instances) {
-             super(program, port); // Call super constructor
-             this.activeInstances = instances;
+        // Updated constructor to accept PluginState
+        public InstanceEndpoints(au.federation.ghidra.PluginState pluginState) {
+             super(pluginState); // Call super constructor with PluginState
         }
 
     @Override
@@ -39,22 +34,74 @@ package au.federation.ghidra.endpoints;
         // This endpoint doesn't require a program to function
         return false;
     }
+    
+    /**
+     * Helper to determine if an instance is a base instance.
+     * Supports both GhidraMCPPlugin and GhidraMCPHeadlessScript instances.
+     */
+    private boolean isBaseInstance(Object instance) {
+        if (instance instanceof GhidraMCPPlugin) {
+            return ((GhidraMCPPlugin) instance).isBaseInstance();
+        } else if (instance instanceof GhidraMCPHeadlessScript) {
+            // Headless scripts don't have isBaseInstance method exposed
+            // Assume base if on default port
+            return false; // TODO: Add isBaseInstance to headless script if needed
+        }
+        return false;
+    }
+    
+    /**
+     * Helper to get the current program from an instance.
+     * Supports both GhidraMCPPlugin and GhidraMCPHeadlessScript instances.
+     */
+    private Program getProgramFromInstance(Object instance) {
+        if (instance instanceof GhidraMCPPlugin) {
+            return ((GhidraMCPPlugin) instance).getCurrentProgram();
+        } else if (instance instanceof GhidraMCPHeadlessScript) {
+            return ((GhidraMCPHeadlessScript) instance).getCurrentProgram();
+        }
+        return null;
+    }
 
         private void handleInstances(HttpExchange exchange) throws IOException {
             try {
                 List<Map<String, Object>> instanceData = new ArrayList<>();
                 
-                // Accessing the static map directly - requires it to be accessible
-                // or passed in constructor.
-                for (Map.Entry<Integer, GhidraMCPPlugin> entry : activeInstances.entrySet()) {
+                // Access the static activeInstances map from both plugin and script
+                Map<Integer, Object> activeInstances = new HashMap<>();
+                activeInstances.putAll(GhidraMCPPlugin.activeInstances);
+                activeInstances.putAll(GhidraMCPHeadlessScript.activeInstances);
+                
+                // Iterate over all active instances
+                for (Map.Entry<Integer, Object> entry : activeInstances.entrySet()) {
                     Map<String, Object> instance = new HashMap<>();
                     int instancePort = entry.getKey();
+                    Object instanceObj = entry.getValue();
+                    
                     instance.put("port", instancePort);
                     instance.put("url", "http://localhost:" + instancePort);
-                    instance.put("type", entry.getValue().isBaseInstance() ? "base" : "standard");
+                    
+                    // Determine instance type
+                    String instanceType = "unknown";
+                    if (isBaseInstance(instanceObj)) {
+                        instanceType = "base";
+                    } else {
+                        instanceType = "standard";
+                    }
+                    
+                    // Add mode info
+                    if (instanceObj instanceof GhidraMCPPlugin) {
+                        instance.put("mode", "gui");
+                    } else if (instanceObj instanceof GhidraMCPHeadlessScript) {
+                        instance.put("mode", "headless");
+                    } else {
+                        instance.put("mode", "unknown");
+                    }
+                    
+                    instance.put("type", instanceType);
                     
                     // Get program info if available
-                    Program program = entry.getValue().getCurrentProgram();
+                    Program program = getProgramFromInstance(instanceObj);
                     if (program != null) {
                         instance.put("project", program.getDomainFile().getParent().getName());
                         instance.put("file", program.getName());
@@ -88,7 +135,7 @@ package au.federation.ghidra.endpoints;
                 }
                 
                 // Build response with HATEOAS links
-                ResponseBuilder builder = new ResponseBuilder(exchange, port)
+                ResponseBuilder builder = new ResponseBuilder(exchange, getPort())
                     .success(true)
                     .result(instanceData);
                 
@@ -128,9 +175,19 @@ package au.federation.ghidra.endpoints;
             try {
                 Map<String, String> params = parseJsonPostParams(exchange);
                 int unregPort = parseIntOrDefault(params.get("port"), 0);
-                if (unregPort > 0 && activeInstances.containsKey(unregPort)) {
-                    // Actual removal should likely happen in the main plugin's map or dedicated manager
-                    activeInstances.remove(unregPort); // Potential ConcurrentModificationException if map is iterated elsewhere
+                
+                // Try to remove from both maps
+                boolean removed = false;
+                if (GhidraMCPPlugin.activeInstances.containsKey(unregPort)) {
+                    GhidraMCPPlugin.activeInstances.remove(unregPort);
+                    removed = true;
+                }
+                if (GhidraMCPHeadlessScript.activeInstances.containsKey(unregPort)) {
+                    GhidraMCPHeadlessScript.activeInstances.remove(unregPort);
+                    removed = true;
+                }
+                
+                if (removed) {
                      sendSuccessResponse(exchange, Map.of("message", "Instance unregistered for port " + unregPort)); // Use helper
                 } else {
                      sendErrorResponse(exchange, 404, "No instance found on port " + unregPort, "RESOURCE_NOT_FOUND"); // Use helper

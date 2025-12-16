@@ -1,0 +1,2036 @@
+/* Complete GhidraMCP Headless Server with ALL endpoints
+ * Feature parity with GUI MCP server
+ * @category GhidraMCP
+ */
+//@category GhidraMCP
+//@keybinding
+//@menupath
+//@toolbar
+
+import ghidra.app.script.GhidraScript;
+import ghidra.program.model.listing.*;
+import ghidra.program.model.symbol.*;
+import ghidra.program.model.address.*;
+import ghidra.program.model.data.*;
+import ghidra.program.model.lang.*;
+import ghidra.program.model.mem.*;
+import ghidra.program.model.pcode.*;
+import ghidra.program.model.util.*;
+import ghidra.program.util.*;
+import ghidra.app.decompiler.*;
+import ghidra.app.util.bin.format.pe.*;
+import ghidra.util.task.*;
+
+import com.sun.net.httpserver.*;
+import java.net.InetSocketAddress;
+import java.io.*;
+import java.util.*;
+import java.util.concurrent.Executors;
+import java.util.stream.Collectors;
+import java.util.Base64;
+
+/**
+ * GhidraMCP Headless Server
+ * Provides HTTP API for MCP integration in headless mode
+ */
+public class GhidraMCPHeadlessServer extends GhidraScript {
+    
+    private static HttpServer server;
+    private Program program;
+    private DecompInterface decompiler;
+    private int port = 8192;
+    
+    @Override
+    public void run() throws Exception {
+        // Get port from environment variable if set
+        String portEnv = System.getenv("GHIDRAMCP_PORT");
+        if (portEnv != null) {
+            try {
+                port = Integer.parseInt(portEnv);
+                println("Using port from GHIDRAMCP_PORT: " + port);
+            } catch (NumberFormatException e) {
+                println("Invalid GHIDRAMCP_PORT, using default: 8192");
+            }
+        }
+        
+        program = getCurrentProgram();
+        if (program == null) {
+            println("ERROR: No program is currently open!");
+            return;
+        }
+        
+        // Initialize decompiler
+        decompiler = new DecompInterface();
+        decompiler.openProgram(program);
+        
+        println("===========================================");
+        println("GhidraMCP Complete Headless Server");
+        println("===========================================");
+        println("Program: " + program.getName());
+        println("Port: " + port);
+        println("===========================================");
+        
+        try {
+            // Create HTTP server
+            server = HttpServer.create(new InetSocketAddress(port), 0);
+            server.setExecutor(Executors.newCachedThreadPool());
+            
+            // Register ALL endpoint groups to match GUI server
+            registerSystemEndpoints();      // /, /plugin-version, /info
+            registerAnalysisEndpoints();     // /analysis/*
+            registerClassEndpoints();        // /classes/*
+            registerDataEndpoints();         // /data/*
+            registerDataTypeEndpoints();     // /datatypes/*
+            registerEquateEndpoints();       // /equates/*
+            registerFunctionEndpoints();     // /functions/*
+            registerMemoryEndpoints();       // /memory/*
+            registerNamespaceEndpoints();    // /namespaces/*
+            registerProgramEndpoints();      // /program/*
+            registerSectionEndpoints();      // /sections/* - CRITICAL for network_config_discover
+            registerSegmentEndpoints();      // /segments/*
+            registerStringEndpoints();       // /strings/*
+            registerSymbolEndpoints();       // /symbols/*
+            registerVariableEndpoints();     // /variables/*
+            registerXrefEndpoints();         // /xrefs/*
+            registerCommentsEndpoints();     // /comments/*
+            
+            // Start the server
+            server.start();
+            println("Complete MCP server started on port " + port);
+            println("All endpoints are available!");
+            
+            // Keep running
+            String keepRunning = System.getenv("GHIDRAMCP_KEEP_RUNNING");
+            if (keepRunning == null || "true".equalsIgnoreCase(keepRunning)) {
+                println("Server running. Press Ctrl+C to stop.");
+                
+                while (!monitor.isCancelled()) {
+                    Thread.sleep(1000);
+                }
+            }
+            
+        } catch (Exception e) {
+            println("ERROR: Failed to start server: " + e.getMessage());
+            e.printStackTrace();
+        } finally {
+            if (decompiler != null) {
+                decompiler.dispose();
+            }
+            if (server != null) {
+                server.stop(0);
+                println("Server stopped.");
+            }
+        }
+    }
+    
+    // ==================== SYSTEM ENDPOINTS ====================
+    private void registerSystemEndpoints() {
+        // Root endpoint
+        server.createContext("/", this::handleRoot);
+        
+        // Plugin version endpoint
+        server.createContext("/plugin-version", this::handlePluginVersion);
+        
+        // Info endpoint
+        server.createContext("/info", this::handleInfo);
+    }
+    
+    private void handleRoot(HttpExchange exchange) throws IOException {
+        Map<String, Object> response = new HashMap<>();
+        response.put("success", true);
+        response.put("message", "GhidraMCP Complete Headless API v2.0");
+        response.put("mode", "headless");
+        response.put("program", program.getName());
+        response.put("endpoints", Arrays.asList(
+            "/analysis", "/classes", "/comments", "/data", "/datatypes", "/equates",
+            "/functions", "/memory", "/namespaces", "/program", "/segments",
+            "/strings", "/symbols", "/variables", "/xrefs"
+        ));
+        sendJsonResponse(exchange, response, 200);
+    }
+    
+    private void handlePluginVersion(HttpExchange exchange) throws IOException {
+        Map<String, Object> response = new HashMap<>();
+        response.put("success", true);
+        Map<String, Object> result = new HashMap<>();
+        result.put("plugin_version", "v2.0.0.1");
+        result.put("api_version", 2510);
+        result.put("mode", "headless");
+        response.put("result", result);
+        sendJsonResponse(exchange, response, 200);
+    }
+    
+    private void handleInfo(HttpExchange exchange) throws IOException {
+        Map<String, Object> response = new HashMap<>();
+        response.put("success", true);
+        Map<String, Object> result = new HashMap<>();
+        result.put("file", program.getName());
+        result.put("architecture", program.getLanguage().getLanguageID().getIdAsString());
+        result.put("processor", program.getLanguage().getProcessor().toString());
+        result.put("addressSize", program.getAddressFactory().getDefaultAddressSpace().getSize());
+        result.put("executable", program.getExecutablePath());
+        result.put("mode", "headless");
+        result.put("serverPort", port);
+        response.put("result", result);
+        sendJsonResponse(exchange, response, 200);
+    }
+    
+    // ==================== FUNCTION ENDPOINTS ====================
+    private void registerFunctionEndpoints() {
+        // Single smart router for all /functions/* paths
+        server.createContext("/functions", exchange -> {
+            safeHandle(exchange, ex -> {
+                String method = ex.getRequestMethod();
+                String path = ex.getRequestURI().getPath();
+                String query = ex.getRequestURI().getQuery();
+                
+                if (!method.equals("GET")) {
+                    sendError(ex, 405, "Method not allowed");
+                    return;
+                }
+                
+                // Parse path segments: /functions/[address]/[action]
+                String[] segments = path.split("/");
+                // segments[0] = "", segments[1] = "functions", segments[2] = address?, segments[3] = action?
+                
+                if (segments.length == 2 || (segments.length == 3 && segments[2].isEmpty())) {
+                    // /functions or /functions/
+                    handleListFunctions(ex, query);
+                } else if (segments.length == 3) {
+                    String addressOrAction = segments[2];
+                    
+                    // Check if it's a special action endpoint
+                    if (addressOrAction.equals("thunks")) {
+                        handleThunkFunctions(ex);
+                    } else if (addressOrAction.equals("external")) {
+                        handleExternalFunctions(ex);
+                    } else {
+                        // It's an address - get function info
+                        handleGetFunction(ex, addressOrAction);
+                    }
+                } else if (segments.length == 4) {
+                    // /functions/{address}/{action}
+                    String address = segments[2];
+                    String action = segments[3];
+                    
+                    switch (action) {
+                        case "decompile":
+                            handleDecompileFunction(ex, address);
+                            break;
+                        case "calls":
+                            handleFunctionCalls(ex, address);
+                            break;
+                        case "callers":
+                            handleFunctionCallers(ex, address);
+                            break;
+                        case "variables":
+                            handleFunctionVariables(ex, address);
+                            break;
+                        case "parameters":
+                            handleFunctionParameters(ex, address);
+                            break;
+                        default:
+                            sendError(ex, 404, "Unknown function action: " + action);
+                    }
+                } else {
+                    sendError(ex, 404, "Invalid function endpoint path");
+                }
+            });
+        });
+    }
+    
+    private void handleListFunctions(HttpExchange exchange, String query) throws IOException {
+        Map<String, String> params = parseQuery(query);
+        int page = Integer.parseInt(params.getOrDefault("page", "1"));
+        int perPage = Integer.parseInt(params.getOrDefault("per_page", "50"));
+        
+        FunctionManager funcMgr = program.getFunctionManager();
+        List<Map<String, Object>> functions = new ArrayList<>();
+        
+        FunctionIterator iter = funcMgr.getFunctions(true);
+        int skip = (page - 1) * perPage;
+        int count = 0;
+        
+        while (iter.hasNext() && count < perPage) {
+            if (skip > 0) {
+                iter.next();
+                skip--;
+                continue;
+            }
+            
+            Function func = iter.next();
+            Map<String, Object> funcData = new HashMap<>();
+            funcData.put("name", func.getName());
+            funcData.put("address", func.getEntryPoint().toString());
+            funcData.put("signature", func.getPrototypeString(true, false));
+            funcData.put("parameterCount", func.getParameterCount());
+            funcData.put("isThunk", func.isThunk());
+            funcData.put("isExternal", func.isExternal());
+            functions.add(funcData);
+            count++;
+        }
+        
+        Map<String, Object> response = new HashMap<>();
+        response.put("success", true);
+        Map<String, Object> result = new HashMap<>();
+        result.put("functions", functions);
+        result.put("total", funcMgr.getFunctionCount());
+        result.put("page", page);
+        result.put("per_page", perPage);
+        response.put("result", result);
+        sendJsonResponse(exchange, response, 200);
+    }
+    
+    private void handleGetFunction(HttpExchange exchange, String addrStr) throws Exception {
+        Address addr = parseAddressString(addrStr);
+        Function func = program.getFunctionManager().getFunctionAt(addr);
+        
+        if (func == null) {
+            sendError(exchange, 404, "Function not found at " + addrStr);
+            return;
+        }
+        
+        Map<String, Object> response = new HashMap<>();
+        response.put("success", true);
+        Map<String, Object> result = new HashMap<>();
+        result.put("name", func.getName());
+        result.put("address", func.getEntryPoint().toString());
+        result.put("signature", func.getPrototypeString(true, false));
+        result.put("comment", func.getComment());
+        result.put("parameterCount", func.getParameterCount());
+        result.put("localVariableCount", func.getLocalVariables().length);
+        result.put("isThunk", func.isThunk());
+        result.put("isExternal", func.isExternal());
+        result.put("callingConvention", func.getCallingConventionName());
+        response.put("result", result);
+        sendJsonResponse(exchange, response, 200);
+    }
+    
+    private void handleDecompileFunction(HttpExchange exchange, String addrStr) throws Exception {
+        Address addr = parseAddressString(addrStr);
+        Function func = program.getFunctionManager().getFunctionContaining(addr);
+        
+        if (func == null) {
+            sendError(exchange, 404, "No function at address " + addrStr);
+            return;
+        }
+        
+        DecompileResults results = decompiler.decompileFunction(func, 30, monitor);
+        if (results == null || !results.decompileCompleted()) {
+            sendError(exchange, 500, "Decompilation failed or timed out");
+            return;
+        }
+        
+        DecompiledFunction decompiledFunc = results.getDecompiledFunction();
+        if (decompiledFunc == null) {
+            sendError(exchange, 500, "Decompilation returned null");
+            return;
+        }
+        
+        String decompiledCode = decompiledFunc.getC();
+        
+        Map<String, Object> response = new HashMap<>();
+        response.put("success", true);
+        Map<String, Object> result = new HashMap<>();
+        result.put("function", func.getName());
+        result.put("address", func.getEntryPoint().toString());
+        result.put("code", decompiledCode);
+        response.put("result", result);
+        sendJsonResponse(exchange, response, 200);
+    }
+    
+    private void handleFunctionCalls(HttpExchange exchange, String addrStr) throws Exception {
+        Address addr = parseAddressString(addrStr);
+        Function func = program.getFunctionManager().getFunctionContaining(addr);
+        
+        if (func == null) {
+            sendError(exchange, 404, "No function at address " + addrStr);
+            return;
+        }
+        
+        List<Map<String, Object>> calls = new ArrayList<>();
+        Set<Function> calledFunctions = func.getCalledFunctions(monitor);
+        
+        for (Function called : calledFunctions) {
+            Map<String, Object> callData = new HashMap<>();
+            callData.put("name", called.getName());
+            callData.put("address", called.getEntryPoint().toString());
+            callData.put("isExternal", called.isExternal());
+            callData.put("isThunk", called.isThunk());
+            calls.add(callData);
+        }
+        
+        Map<String, Object> response = new HashMap<>();
+        response.put("success", true);
+        Map<String, Object> result = new HashMap<>();
+        result.put("function", func.getName());
+        result.put("address", func.getEntryPoint().toString());
+        result.put("calls", calls);
+        result.put("count", calls.size());
+        response.put("result", result);
+        sendJsonResponse(exchange, response, 200);
+    }
+    
+    private void handleFunctionCallers(HttpExchange exchange, String addrStr) throws Exception {
+        Address addr = parseAddressString(addrStr);
+        Function func = program.getFunctionManager().getFunctionAt(addr);
+        
+        if (func == null) {
+            sendError(exchange, 404, "Function not found at " + addrStr);
+            return;
+        }
+        
+        List<Map<String, Object>> callers = new ArrayList<>();
+        Set<Function> callingFunctions = func.getCallingFunctions(monitor);
+        
+        for (Function caller : callingFunctions) {
+            Map<String, Object> callerData = new HashMap<>();
+            callerData.put("name", caller.getName());
+            callerData.put("address", caller.getEntryPoint().toString());
+            callers.add(callerData);
+        }
+        
+        Map<String, Object> response = new HashMap<>();
+        response.put("success", true);
+        Map<String, Object> result = new HashMap<>();
+        result.put("function", func.getName());
+        result.put("address", func.getEntryPoint().toString());
+        result.put("callers", callers);
+        result.put("count", callers.size());
+        response.put("result", result);
+        sendJsonResponse(exchange, response, 200);
+    }
+    
+    private void handleFunctionVariables(HttpExchange exchange, String addrStr) throws Exception {
+        Address addr = parseAddressString(addrStr);
+        Function func = program.getFunctionManager().getFunctionAt(addr);
+        
+        if (func == null) {
+            sendError(exchange, 404, "Function not found at " + addrStr);
+            return;
+        }
+        
+        List<Map<String, Object>> variables = new ArrayList<>();
+        Variable[] localVars = func.getLocalVariables();
+        
+        for (Variable var : localVars) {
+            Map<String, Object> varData = new HashMap<>();
+            varData.put("name", var.getName());
+            varData.put("dataType", var.getDataType().getName());
+            varData.put("length", var.getLength());
+            varData.put("comment", var.getComment());
+            variables.add(varData);
+        }
+        
+        Map<String, Object> response = new HashMap<>();
+        response.put("success", true);
+        Map<String, Object> result = new HashMap<>();
+        result.put("function", func.getName());
+        result.put("address", func.getEntryPoint().toString());
+        result.put("variables", variables);
+        result.put("count", variables.size());
+        response.put("result", result);
+        sendJsonResponse(exchange, response, 200);
+    }
+    
+    private void handleFunctionParameters(HttpExchange exchange, String addrStr) throws Exception {
+        Address addr = parseAddressString(addrStr);
+        Function func = program.getFunctionManager().getFunctionAt(addr);
+        
+        if (func == null) {
+            sendError(exchange, 404, "Function not found at " + addrStr);
+            return;
+        }
+        
+        List<Map<String, Object>> parameters = new ArrayList<>();
+        Parameter[] params = func.getParameters();
+        
+        for (Parameter param : params) {
+            Map<String, Object> paramData = new HashMap<>();
+            paramData.put("name", param.getName());
+            paramData.put("dataType", param.getDataType().getName());
+            paramData.put("ordinal", param.getOrdinal());
+            paramData.put("length", param.getLength());
+            paramData.put("comment", param.getComment());
+            parameters.add(paramData);
+        }
+        
+        Map<String, Object> response = new HashMap<>();
+        response.put("success", true);
+        Map<String, Object> result = new HashMap<>();
+        result.put("function", func.getName());
+        result.put("address", func.getEntryPoint().toString());
+        result.put("parameters", parameters);
+        result.put("count", parameters.size());
+        response.put("result", result);
+        sendJsonResponse(exchange, response, 200);
+    }
+    
+    private void handleThunkFunctions(HttpExchange exchange) throws IOException {
+        FunctionManager funcMgr = program.getFunctionManager();
+        List<Map<String, Object>> thunks = new ArrayList<>();
+        
+        FunctionIterator iter = funcMgr.getFunctions(true);
+        while (iter.hasNext()) {
+            Function func = iter.next();
+            if (func.isThunk()) {
+                Map<String, Object> thunkData = new HashMap<>();
+                thunkData.put("name", func.getName());
+                thunkData.put("address", func.getEntryPoint().toString());
+                Function thunkedFunc = func.getThunkedFunction(false);
+                if (thunkedFunc != null) {
+                    thunkData.put("thunkedFunction", thunkedFunc.getName());
+                    thunkData.put("thunkedAddress", thunkedFunc.getEntryPoint().toString());
+                }
+                thunks.add(thunkData);
+            }
+        }
+        
+        Map<String, Object> response = new HashMap<>();
+        response.put("success", true);
+        Map<String, Object> result = new HashMap<>();
+        result.put("thunks", thunks);
+        result.put("count", thunks.size());
+        response.put("result", result);
+        sendJsonResponse(exchange, response, 200);
+    }
+    
+    private void handleExternalFunctions(HttpExchange exchange) throws IOException {
+        FunctionManager funcMgr = program.getFunctionManager();
+        List<Map<String, Object>> externals = new ArrayList<>();
+        
+        FunctionIterator iter = funcMgr.getExternalFunctions();
+        while (iter.hasNext()) {
+            Function func = iter.next();
+            Map<String, Object> extData = new HashMap<>();
+            extData.put("name", func.getName());
+            extData.put("address", func.getEntryPoint().toString());
+            extData.put("signature", func.getPrototypeString(true, false));
+            ExternalLocation extLoc = func.getExternalLocation();
+            if (extLoc != null) {
+                extData.put("library", extLoc.getLibraryName());
+                extData.put("originalName", extLoc.getOriginalImportedName());
+            }
+            externals.add(extData);
+        }
+        
+        Map<String, Object> response = new HashMap<>();
+        response.put("success", true);
+        Map<String, Object> result = new HashMap<>();
+        result.put("externals", externals);
+        result.put("count", externals.size());
+        response.put("result", result);
+        sendJsonResponse(exchange, response, 200);
+    }
+    
+    // ==================== STRING ENDPOINTS ====================
+    private void registerStringEndpoints() {
+        server.createContext("/strings", exchange -> {
+            String query = exchange.getRequestURI().getQuery();
+            handleListStrings(exchange, query);
+        });
+    }
+    
+    private void handleListStrings(HttpExchange exchange, String query) throws IOException {
+        Map<String, String> params = parseQuery(query);
+        int page = Integer.parseInt(params.getOrDefault("page", "1"));
+        int perPage = Integer.parseInt(params.getOrDefault("per_page", "50"));
+        int minLength = Integer.parseInt(params.getOrDefault("min_length", "4"));
+        
+        List<Map<String, Object>> strings = new ArrayList<>();
+        
+        // Find all defined strings
+        DataIterator dataIter = program.getListing().getDefinedData(true);
+        int skip = (page - 1) * perPage;
+        int count = 0;
+        int total = 0;
+        
+        while (dataIter.hasNext()) {
+            Data data = dataIter.next();
+            if (data.hasStringValue()) {
+                total++;
+                
+                String value = data.getDefaultValueRepresentation();
+                if (value.length() >= minLength) {
+                    if (skip > 0) {
+                        skip--;
+                        continue;
+                    }
+                    
+                    if (count < perPage) {
+                        Map<String, Object> strData = new HashMap<>();
+                        strData.put("address", data.getAddress().toString());
+                        strData.put("value", value);
+                        strData.put("length", value.length());
+                        strData.put("type", data.getDataType().getName());
+                        strings.add(strData);
+                        count++;
+                    }
+                }
+            }
+        }
+        
+        Map<String, Object> response = new HashMap<>();
+        response.put("success", true);
+        Map<String, Object> result = new HashMap<>();
+        result.put("strings", strings);
+        result.put("total", total);
+        result.put("page", page);
+        result.put("per_page", perPage);
+        response.put("result", result);
+        sendJsonResponse(exchange, response, 200);
+    }
+    
+    // ==================== SYMBOL ENDPOINTS ====================
+    private void registerSymbolEndpoints() {
+        server.createContext("/symbols", exchange -> {
+            String query = exchange.getRequestURI().getQuery();
+            handleListSymbols(exchange, query);
+        });
+    }
+    
+    private void handleListSymbols(HttpExchange exchange, String query) throws IOException {
+        Map<String, String> params = parseQuery(query);
+        int page = Integer.parseInt(params.getOrDefault("page", "1"));
+        int perPage = Integer.parseInt(params.getOrDefault("per_page", "50"));
+        String filter = params.getOrDefault("filter", "");
+        
+        SymbolTable symTable = program.getSymbolTable();
+        List<Map<String, Object>> symbols = new ArrayList<>();
+        
+        SymbolIterator iter = symTable.getAllSymbols(true);
+        int skip = (page - 1) * perPage;
+        int count = 0;
+        
+        while (iter.hasNext() && count < perPage) {
+            Symbol sym = iter.next();
+            
+            // Skip if filter doesn't match
+            if (!filter.isEmpty() && !sym.getName().contains(filter)) {
+                continue;
+            }
+            
+            if (skip > 0) {
+                skip--;
+                continue;
+            }
+            
+            Map<String, Object> symData = new HashMap<>();
+            symData.put("name", sym.getName());
+            symData.put("address", sym.getAddress().toString());
+            symData.put("type", sym.getSymbolType().toString());
+            symData.put("source", sym.getSource().toString());
+            symData.put("isPrimary", sym.isPrimary());
+            symData.put("isGlobal", sym.isGlobal());
+            symbols.add(symData);
+            count++;
+        }
+        
+        Map<String, Object> response = new HashMap<>();
+        response.put("success", true);
+        Map<String, Object> result = new HashMap<>();
+        result.put("symbols", symbols);
+        result.put("page", page);
+        result.put("per_page", perPage);
+        response.put("result", result);
+        sendJsonResponse(exchange, response, 200);
+    }
+    
+    // ==================== MEMORY ENDPOINTS ====================
+    private void registerMemoryEndpoints() {
+        server.createContext("/memory", exchange -> {
+            safeHandle(exchange, ex -> {
+                String path = ex.getRequestURI().getPath();
+                String query = ex.getRequestURI().getQuery();
+                
+                String[] segments = path.split("/");
+                
+                if (segments.length == 2 || (segments.length == 3 && segments[2].isEmpty())) {
+                    // /memory or /memory/
+                    handleMemoryInfo(ex);
+                } else if (segments.length == 3) {
+                    String action = segments[2];
+                    switch (action) {
+                        case "read":
+                            handleMemoryRead(ex, query);
+                            break;
+                        case "search":
+                            handleMemorySearch(ex, query);
+                            break;
+                        case "strings":
+                            handleMemoryStrings(ex, query);
+                            break;
+                        case "blocks":
+                            // Alias for sections list - compatibility
+                            handleListSections(ex);
+                            break;
+                        default:
+                            sendError(ex, 404, "Unknown memory action: " + action);
+                    }
+                } else {
+                    sendError(ex, 404, "Invalid memory endpoint path");
+                }
+            });
+        });
+    }
+    
+    private void handleMemoryInfo(HttpExchange exchange) throws IOException {
+        Memory memory = program.getMemory();
+        
+        List<Map<String, Object>> blocks = new ArrayList<>();
+        for (MemoryBlock block : memory.getBlocks()) {
+            Map<String, Object> blockData = new HashMap<>();
+            blockData.put("name", block.getName());
+            blockData.put("start", block.getStart().toString());
+            blockData.put("end", block.getEnd().toString());
+            blockData.put("size", block.getSize());
+            blockData.put("isExecute", block.isExecute());
+            blockData.put("isWrite", block.isWrite());
+            blockData.put("isRead", block.isRead());
+            blockData.put("isInitialized", block.isInitialized());
+            blocks.add(blockData);
+        }
+        
+        Map<String, Object> response = new HashMap<>();
+        response.put("success", true);
+        Map<String, Object> result = new HashMap<>();
+        result.put("blocks", blocks);
+        result.put("totalSize", memory.getSize());
+        result.put("numBlocks", blocks.size());
+        response.put("result", result);
+        sendJsonResponse(exchange, response, 200);
+    }
+    
+    private void handleMemoryRead(HttpExchange exchange, String query) throws Exception {
+        Map<String, String> params = parseQuery(query);
+        String addrStr = params.get("address");
+        String startStr = params.get("start_address");
+        String endStr = params.get("end_address");
+        String format = params.getOrDefault("format", "hex");
+        int length = Integer.parseInt(params.getOrDefault("length", "256"));
+        
+        if (addrStr == null && startStr == null) {
+            sendError(exchange, 400, "Missing address or start_address parameter");
+            return;
+        }
+        
+        byte[] bytes;
+        Address startAddr;
+        boolean truncated = false;
+        
+        if (startStr != null && endStr != null) {
+            // Range read (start_address to end_address)
+            startAddr = parseAddressString(startStr);
+            Address endAddr = parseAddressString(endStr);
+            long rangeSize = endAddr.subtract(startAddr) + 1;
+            
+            // Safety limit for range reads: 1MB
+            if (rangeSize > 1024 * 1024) {
+                rangeSize = 1024 * 1024;
+                truncated = true;
+            }
+            
+            bytes = new byte[(int)rangeSize];
+            program.getMemory().getBytes(startAddr, bytes);
+        } else {
+            // Single address read
+            startAddr = parseAddressString(addrStr != null ? addrStr : startStr);
+            
+            // Safety limit for single address: 64KB
+            int readLength = Math.min(length, 65536);
+            bytes = new byte[readLength];
+            program.getMemory().getBytes(startAddr, bytes);
+        }
+        
+        Map<String, Object> response = new HashMap<>();
+        response.put("success", true);
+        Map<String, Object> result = new HashMap<>();
+        result.put("address", startAddr.toString());
+        result.put("length", bytes.length);
+        
+        if ("base64".equalsIgnoreCase(format)) {
+            // Base64 format - use 'rawBytes' field for compatibility
+            result.put("rawBytes", Base64.getEncoder().encodeToString(bytes));
+            result.put("format", "base64");
+        } else {
+            // Default hex format
+            StringBuilder hex = new StringBuilder();
+            for (byte b : bytes) {
+                hex.append(String.format("%02x", b));
+            }
+            result.put("data", hex.toString());
+            result.put("format", "hex");
+        }
+        
+        if (truncated) {
+            result.put("truncated", true);
+        }
+        
+        response.put("result", result);
+        sendJsonResponse(exchange, response, 200);
+    }
+    
+    private void handleMemorySearch(HttpExchange exchange, String query) throws IOException {
+        Map<String, String> params = parseQuery(query);
+        String pattern = params.get("pattern");
+        
+        if (pattern == null) {
+            sendError(exchange, 400, "Missing pattern parameter");
+            return;
+        }
+        
+        // Convert hex pattern to bytes
+        byte[] searchBytes;
+        try {
+            searchBytes = hexStringToByteArray(pattern);
+        } catch (Exception e) {
+            sendError(exchange, 400, "Invalid hex pattern");
+            return;
+        }
+        
+        List<Map<String, Object>> matches = new ArrayList<>();
+        Memory memory = program.getMemory();
+        
+        // Search in all memory blocks
+        for (MemoryBlock block : memory.getBlocks()) {
+            if (!block.isInitialized()) continue;
+            
+            Address searchAddr = block.getStart();
+            while (searchAddr != null && searchAddr.compareTo(block.getEnd()) <= 0) {
+                Address found = memory.findBytes(searchAddr, block.getEnd(), searchBytes, null, true, null);
+                if (found == null) break;
+                
+                Map<String, Object> match = new HashMap<>();
+                match.put("address", found.toString());
+                match.put("block", block.getName());
+                matches.add(match);
+                
+                searchAddr = found.add(1);
+                if (matches.size() >= 100) break; // Limit results
+            }
+            if (matches.size() >= 100) break;
+        }
+        
+        Map<String, Object> response = new HashMap<>();
+        response.put("success", true);
+        Map<String, Object> result = new HashMap<>();
+        result.put("matches", matches);
+        result.put("count", matches.size());
+        response.put("result", result);
+        sendJsonResponse(exchange, response, 200);
+    }
+    
+    private void handleMemoryStrings(HttpExchange exchange, String query) throws IOException {
+        Map<String, String> params = parseQuery(query);
+        int minLength = Integer.parseInt(params.getOrDefault("min_length", "4"));
+        
+        List<Map<String, Object>> strings = new ArrayList<>();
+        DataIterator dataIter = program.getListing().getDefinedData(true);
+        
+        int count = 0;
+        while (dataIter.hasNext() && count < 100) {
+            Data data = dataIter.next();
+            if (data.hasStringValue()) {
+                String value = data.getDefaultValueRepresentation();
+                if (value.length() >= minLength) {
+                    Map<String, Object> strData = new HashMap<>();
+                    strData.put("address", data.getAddress().toString());
+                    strData.put("value", value);
+                    strData.put("length", value.length());
+                    strings.add(strData);
+                    count++;
+                }
+            }
+        }
+        
+        Map<String, Object> response = new HashMap<>();
+        response.put("success", true);
+        Map<String, Object> result = new HashMap<>();
+        result.put("strings", strings);
+        result.put("count", strings.size());
+        response.put("result", result);
+        sendJsonResponse(exchange, response, 200);
+    }
+    
+    private byte[] hexStringToByteArray(String s) {
+        int len = s.length();
+        byte[] data = new byte[len / 2];
+        for (int i = 0; i < len; i += 2) {
+            data[i / 2] = (byte) ((Character.digit(s.charAt(i), 16) << 4)
+                                 + Character.digit(s.charAt(i+1), 16));
+        }
+        return data;
+    }
+    
+    // ==================== XREF ENDPOINTS ====================
+    private void registerXrefEndpoints() {
+        server.createContext("/xrefs", exchange -> {
+            safeHandle(exchange, ex -> {
+                String query = ex.getRequestURI().getQuery();
+                handleGetXrefs(ex, query);
+            });
+        });
+    }
+    
+    private void handleGetXrefs(HttpExchange exchange, String query) throws Exception {
+        Map<String, String> params = parseQuery(query);
+        String addrStr = params.get("address");
+        
+        if (addrStr == null) {
+            sendError(exchange, 400, "Missing address parameter");
+            return;
+        }
+        
+        Address addr = parseAddressString(addrStr);
+        
+        // Get references TO this address
+        ReferenceIterator refsToIter = program.getReferenceManager().getReferencesTo(addr);
+        List<Map<String, Object>> toRefs = new ArrayList<>();
+        while (refsToIter.hasNext()) {
+            Reference ref = refsToIter.next();
+            Map<String, Object> refData = new HashMap<>();
+            refData.put("from", ref.getFromAddress().toString());
+            refData.put("type", ref.getReferenceType().getName());
+            refData.put("isPrimary", ref.isPrimary());
+            toRefs.add(refData);
+        }
+        
+        // Get references FROM this address
+        Reference[] refsFrom = program.getReferenceManager().getReferencesFrom(addr);
+        List<Map<String, Object>> fromRefs = new ArrayList<>();
+        for (Reference ref : refsFrom) {
+            Map<String, Object> refData = new HashMap<>();
+            refData.put("to", ref.getToAddress().toString());
+            refData.put("type", ref.getReferenceType().getName());
+            refData.put("isPrimary", ref.isPrimary());
+            fromRefs.add(refData);
+        }
+        
+        Map<String, Object> response = new HashMap<>();
+        response.put("success", true);
+        Map<String, Object> result = new HashMap<>();
+        result.put("address", addrStr);
+        result.put("references_to", toRefs);
+        result.put("references_from", fromRefs);
+        response.put("result", result);
+        sendJsonResponse(exchange, response, 200);
+    }
+    
+    // ==================== Additional Endpoint Stubs ====================
+    // Note: registerAnalysisEndpoints() and registerClassEndpoints() are defined below
+    
+    private void registerDataEndpoints() {
+        server.createContext("/data", exchange -> {
+            safeHandle(exchange, ex -> {
+                String method = ex.getRequestMethod();
+                String path = ex.getRequestURI().getPath();
+                String query = ex.getRequestURI().getQuery();
+                
+                if (!method.equals("GET")) {
+                    sendError(ex, 405, "Method not allowed");
+                    return;
+                }
+                
+                // Parse path segments: /data/[address]/[action]
+                String[] segments = path.split("/");
+                
+                if (segments.length == 2 || (segments.length == 3 && segments[2].isEmpty())) {
+                    // /data or /data/
+                    handleListData(ex, query);
+                } else if (segments.length == 3) {
+                    // /data/{address}
+                    handleGetDataAt(ex, segments[2]);
+                } else if (segments.length == 4 && segments[3].equals("references")) {
+                    // /data/{address}/references
+                    handleDataReferences(ex, segments[2]);
+                } else {
+                    sendError(ex, 404, "Invalid data endpoint path");
+                }
+            });
+        });
+    }
+    
+    private void handleListData(HttpExchange exchange, String query) throws IOException {
+        Map<String, String> params = parseQuery(query);
+        int page = Integer.parseInt(params.getOrDefault("page", "1"));
+        int perPage = Integer.parseInt(params.getOrDefault("per_page", "50"));
+        
+        List<Map<String, Object>> dataList = new ArrayList<>();
+        DataIterator dataIter = program.getListing().getDefinedData(true);
+        
+        int skip = (page - 1) * perPage;
+        int count = 0;
+        int total = 0;
+        
+        while (dataIter.hasNext()) {
+            Data data = dataIter.next();
+            total++;
+            
+            if (skip > 0) {
+                skip--;
+                continue;
+            }
+            
+            if (count < perPage) {
+                Map<String, Object> dataInfo = new HashMap<>();
+                dataInfo.put("address", data.getAddress().toString());
+                dataInfo.put("type", data.getDataType().getName());
+                dataInfo.put("length", data.getLength());
+                Object value = data.getValue();
+                if (value != null) {
+                    dataInfo.put("value", value.toString());
+                }
+                dataInfo.put("label", data.getLabel());
+                dataList.add(dataInfo);
+                count++;
+            }
+        }
+        
+        Map<String, Object> response = new HashMap<>();
+        response.put("success", true);
+        Map<String, Object> result = new HashMap<>();
+        result.put("data", dataList);
+        result.put("total", total);
+        result.put("page", page);
+        result.put("per_page", perPage);
+        response.put("result", result);
+        sendJsonResponse(exchange, response, 200);
+    }
+    
+    private void handleGetDataAt(HttpExchange exchange, String addrStr) throws Exception {
+        Address addr = parseAddressString(addrStr);
+        Data data = program.getListing().getDataAt(addr);
+        
+        if (data == null) {
+            sendError(exchange, 404, "No data at address " + addrStr);
+            return;
+        }
+        
+        Map<String, Object> response = new HashMap<>();
+        response.put("success", true);
+        Map<String, Object> result = new HashMap<>();
+        result.put("address", data.getAddress().toString());
+        result.put("type", data.getDataType().getName());
+        result.put("length", data.getLength());
+        result.put("label", data.getLabel());
+        result.put("comment", program.getListing().getComment(CodeUnit.EOL_COMMENT, data.getAddress()));
+        
+        Object value = data.getValue();
+        if (value != null) {
+            result.put("value", value.toString());
+        }
+        
+        // Get representation
+        result.put("representation", data.getDefaultValueRepresentation());
+        
+        response.put("result", result);
+        sendJsonResponse(exchange, response, 200);
+    }
+    
+    private void handleDataReferences(HttpExchange exchange, String addrStr) throws Exception {
+        Address addr = parseAddressString(addrStr);
+            Data data = program.getListing().getDataAt(addr);
+            
+            if (data == null) {
+                sendError(exchange, 404, "No data at address " + addrStr);
+            return;
+        }
+        
+        // Get references TO this data
+        ReferenceIterator refsToIter = program.getReferenceManager().getReferencesTo(addr);
+        List<Map<String, Object>> toRefs = new ArrayList<>();
+        while (refsToIter.hasNext()) {
+            Reference ref = refsToIter.next();
+            Map<String, Object> refData = new HashMap<>();
+            refData.put("from", ref.getFromAddress().toString());
+            refData.put("type", ref.getReferenceType().getName());
+            toRefs.add(refData);
+        }
+        
+        // Get references FROM this data
+        Reference[] refsFrom = program.getReferenceManager().getReferencesFrom(addr);
+        List<Map<String, Object>> fromRefs = new ArrayList<>();
+        for (Reference ref : refsFrom) {
+            Map<String, Object> refData = new HashMap<>();
+            refData.put("to", ref.getToAddress().toString());
+            refData.put("type", ref.getReferenceType().getName());
+            fromRefs.add(refData);
+        }
+        
+        Map<String, Object> response = new HashMap<>();
+        response.put("success", true);
+        Map<String, Object> result = new HashMap<>();
+        result.put("address", addrStr);
+        result.put("references_to", toRefs);
+        result.put("references_from", fromRefs);
+        response.put("result", result);
+        sendJsonResponse(exchange, response, 200);
+    }
+    
+    private void registerDataTypeEndpoints() {
+        server.createContext("/datatypes", exchange -> {
+            String path = exchange.getRequestURI().getPath();
+            String query = exchange.getRequestURI().getQuery();
+            
+            if (path.equals("/datatypes") || path.equals("/datatypes/")) {
+                handleListDataTypes(exchange, query);
+            } else if (path.equals("/datatypes/structs")) {
+                handleListStructs(exchange);
+            } else if (path.equals("/datatypes/enums")) {
+                handleListEnums(exchange);
+            } else if (path.equals("/datatypes/categories")) {
+                handleListCategories(exchange);
+            } else {
+                sendError(exchange, 404, "Endpoint not found");
+            }
+        });
+    }
+    
+    private void handleListDataTypes(HttpExchange exchange, String query) throws IOException {
+        DataTypeManager dtm = program.getDataTypeManager();
+        List<Map<String, Object>> dataTypes = new ArrayList<>();
+        
+        Iterator<DataType> iter = dtm.getAllDataTypes();
+        int count = 0;
+        int maxResults = 100; // Limit results
+        
+        while (iter.hasNext() && count < maxResults) {
+            DataType dt = iter.next();
+            Map<String, Object> dtData = new HashMap<>();
+            dtData.put("name", dt.getName());
+            dtData.put("path", dt.getPathName());
+            dtData.put("length", dt.getLength());
+            dtData.put("description", dt.getDescription());
+            dataTypes.add(dtData);
+            count++;
+        }
+        
+        Map<String, Object> response = new HashMap<>();
+        response.put("success", true);
+        Map<String, Object> result = new HashMap<>();
+        result.put("datatypes", dataTypes);
+        result.put("count", dataTypes.size());
+        response.put("result", result);
+        sendJsonResponse(exchange, response, 200);
+    }
+    
+    private void handleListStructs(HttpExchange exchange) throws IOException {
+        DataTypeManager dtm = program.getDataTypeManager();
+        List<Map<String, Object>> structs = new ArrayList<>();
+        
+        Iterator<DataType> iter = dtm.getAllDataTypes();
+        while (iter.hasNext()) {
+            DataType dt = iter.next();
+            if (dt instanceof Structure) {
+                Structure struct = (Structure) dt;
+                Map<String, Object> structData = new HashMap<>();
+                structData.put("name", struct.getName());
+                structData.put("path", struct.getPathName());
+                structData.put("length", struct.getLength());
+                structData.put("numComponents", struct.getNumComponents());
+                structs.add(structData);
+            }
+        }
+        
+        Map<String, Object> response = new HashMap<>();
+        response.put("success", true);
+        Map<String, Object> result = new HashMap<>();
+        result.put("structs", structs);
+        result.put("count", structs.size());
+        response.put("result", result);
+        sendJsonResponse(exchange, response, 200);
+    }
+    
+    private void handleListEnums(HttpExchange exchange) throws IOException {
+        DataTypeManager dtm = program.getDataTypeManager();
+        List<Map<String, Object>> enums = new ArrayList<>();
+        
+        Iterator<DataType> iter = dtm.getAllDataTypes();
+        while (iter.hasNext()) {
+            DataType dt = iter.next();
+            if (dt instanceof ghidra.program.model.data.Enum) {
+                ghidra.program.model.data.Enum enumDt = (ghidra.program.model.data.Enum) dt;
+                Map<String, Object> enumData = new HashMap<>();
+                enumData.put("name", enumDt.getName());
+                enumData.put("path", enumDt.getPathName());
+                enumData.put("count", enumDt.getCount());
+                enums.add(enumData);
+            }
+        }
+        
+        Map<String, Object> response = new HashMap<>();
+        response.put("success", true);
+        Map<String, Object> result = new HashMap<>();
+        result.put("enums", enums);
+        result.put("count", enums.size());
+        response.put("result", result);
+        sendJsonResponse(exchange, response, 200);
+    }
+    
+    private void handleListCategories(HttpExchange exchange) throws IOException {
+        DataTypeManager dtm = program.getDataTypeManager();
+        List<Map<String, Object>> categories = new ArrayList<>();
+        
+        Category root = dtm.getRootCategory();
+        addCategoryRecursive(root, categories);
+        
+        Map<String, Object> response = new HashMap<>();
+        response.put("success", true);
+        Map<String, Object> result = new HashMap<>();
+        result.put("categories", categories);
+        result.put("count", categories.size());
+        response.put("result", result);
+        sendJsonResponse(exchange, response, 200);
+    }
+    
+    private void addCategoryRecursive(Category category, List<Map<String, Object>> categories) {
+        Map<String, Object> catData = new HashMap<>();
+        catData.put("name", category.getName());
+        catData.put("path", category.getCategoryPathName());
+        categories.add(catData);
+        
+        for (Category subCat : category.getCategories()) {
+            addCategoryRecursive(subCat, categories);
+        }
+    }
+    
+    private void registerEquateEndpoints() {
+        server.createContext("/equates", exchange -> {
+            String query = exchange.getRequestURI().getQuery();
+            handleListEquates(exchange, query);
+        });
+    }
+    
+    private void handleListEquates(HttpExchange exchange, String query) throws IOException {
+        EquateTable equateTable = program.getEquateTable();
+        List<Map<String, Object>> equates = new ArrayList<>();
+        
+        Iterator<Equate> iter = equateTable.getEquates();
+        while (iter.hasNext()) {
+            Equate equate = iter.next();
+            Map<String, Object> eqData = new HashMap<>();
+            eqData.put("name", equate.getName());
+            eqData.put("value", equate.getValue());
+            eqData.put("referenceCount", equate.getReferenceCount());
+            equates.add(eqData);
+        }
+        
+        Map<String, Object> response = new HashMap<>();
+        response.put("success", true);
+        Map<String, Object> result = new HashMap<>();
+        result.put("equates", equates);
+        result.put("count", equates.size());
+        response.put("result", result);
+        sendJsonResponse(exchange, response, 200);
+    }
+    
+    private void registerNamespaceEndpoints() {
+        server.createContext("/namespaces", exchange -> {
+            handleListNamespaces(exchange);
+        });
+    }
+    
+    private void handleListNamespaces(HttpExchange exchange) throws IOException {
+        SymbolTable symbolTable = program.getSymbolTable();
+        List<Map<String, Object>> namespaces = new ArrayList<>();
+        
+        // Get all namespaces by iterating through all symbols
+        SymbolIterator allSymbols = symbolTable.getAllSymbols(true);
+        Set<Long> seenNamespaces = new HashSet<>();
+        
+        while (allSymbols.hasNext()) {
+            Symbol symbol = allSymbols.next();
+            Namespace ns = symbol.getParentNamespace();
+            
+            if (ns != null && !ns.isGlobal() && !seenNamespaces.contains(ns.getID())) {
+                seenNamespaces.add(ns.getID());
+                
+                Map<String, Object> nsData = new HashMap<>();
+                nsData.put("name", ns.getName());
+                nsData.put("id", ns.getID());
+                
+                Namespace parent = ns.getParentNamespace();
+                if (parent != null && !parent.isGlobal()) {
+                    nsData.put("parent", parent.getName());
+                }
+                
+                // Count symbols in this namespace
+                int symbolCount = 0;
+                SymbolIterator symIter = symbolTable.getSymbols(ns);
+                while (symIter.hasNext()) {
+                    symIter.next();
+                    symbolCount++;
+                }
+                nsData.put("symbolCount", symbolCount);
+                
+                namespaces.add(nsData);
+            }
+        }
+        
+        Map<String, Object> response = new HashMap<>();
+        response.put("success", true);
+        Map<String, Object> result = new HashMap<>();
+        result.put("namespaces", namespaces);
+        result.put("count", namespaces.size());
+        response.put("result", result);
+        sendJsonResponse(exchange, response, 200);
+    }
+    
+    private void registerProgramEndpoints() {
+        server.createContext("/program", exchange -> {
+            String path = exchange.getRequestURI().getPath();
+            
+            if (path.equals("/program") || path.equals("/program/")) {
+                handleProgramInfo(exchange);
+            } else if (path.equals("/program/imports")) {
+                handleProgramImports(exchange);
+            } else if (path.equals("/program/exports")) {
+                handleProgramExports(exchange);
+            } else if (path.equals("/program/entrypoints")) {
+                handleProgramEntryPoints(exchange);
+            } else if (path.equals("/program/base-address")) {
+                handleProgramBaseAddress(exchange);
+            } else {
+                sendError(exchange, 404, "Endpoint not found");
+            }
+        });
+        
+        // Also register /programs/* for compatibility
+        server.createContext("/programs", exchange -> {
+            String path = exchange.getRequestURI().getPath();
+            if (path.startsWith("/programs/current/memory/blocks")) {
+                handleListSections(exchange);
+            } else {
+                sendError(exchange, 404, "Unknown programs endpoint");
+            }
+        });
+    }
+    
+    private void handleProgramInfo(HttpExchange exchange) throws IOException {
+        Map<String, Object> response = new HashMap<>();
+        response.put("success", true);
+        Map<String, Object> result = new HashMap<>();
+        result.put("name", program.getName());
+        result.put("path", program.getExecutablePath());
+        
+        // Multiple field names for compatibility
+        String imageBaseStr = program.getImageBase().toString();
+        result.put("imageBase", imageBaseStr);
+        result.put("image_base", imageBaseStr);  // Alternative name
+        
+        result.put("minAddress", program.getMinAddress().toString());
+        result.put("maxAddress", program.getMaxAddress().toString());
+        
+        String languageStr = program.getLanguageID().getIdAsString();
+        result.put("language", languageStr);
+        result.put("languageId", languageStr);  // Alternative name
+        
+        String compilerStr = program.getCompilerSpec().getCompilerSpecID().getIdAsString();
+        result.put("compiler", compilerStr);
+        result.put("compilerSpecId", compilerStr);  // Alternative name
+        
+        result.put("creationDate", program.getCreationDate().toString());
+        result.put("programId", program.getName());  // Additional field
+        
+        response.put("result", result);
+        sendJsonResponse(exchange, response, 200);
+    }
+    
+    private void handleProgramBaseAddress(HttpExchange exchange) throws IOException {
+        Map<String, Object> response = new HashMap<>();
+        response.put("success", true);
+        Map<String, Object> result = new HashMap<>();
+        
+        long baseAddr = program.getImageBase().getOffset();
+        result.put("base_address", program.getImageBase().toString());
+        result.put("base_address_hex", String.format("0x%X", baseAddr));
+        result.put("base_address_dec", baseAddr);
+        
+        response.put("result", result);
+        sendJsonResponse(exchange, response, 200);
+    }
+    
+    private void handleProgramImports(HttpExchange exchange) throws IOException {
+        ExternalManager extMgr = program.getExternalManager();
+        List<Map<String, Object>> imports = new ArrayList<>();
+        
+        String[] extNames = extMgr.getExternalLibraryNames();
+        for (String libName : extNames) {
+            ExternalLocationIterator iter = extMgr.getExternalLocations(libName);
+            while (iter.hasNext()) {
+                ExternalLocation loc = iter.next();
+                Map<String, Object> impData = new HashMap<>();
+                impData.put("library", libName);
+                impData.put("name", loc.getLabel());
+                impData.put("address", loc.getAddress().toString());
+                impData.put("originalName", loc.getOriginalImportedName());
+                imports.add(impData);
+            }
+        }
+        
+        Map<String, Object> response = new HashMap<>();
+        response.put("success", true);
+        Map<String, Object> result = new HashMap<>();
+        result.put("imports", imports);
+        result.put("count", imports.size());
+        response.put("result", result);
+        sendJsonResponse(exchange, response, 200);
+    }
+    
+    private void handleProgramExports(HttpExchange exchange) throws IOException {
+        SymbolTable symTable = program.getSymbolTable();
+        List<Map<String, Object>> exports = new ArrayList<>();
+        
+        SymbolIterator iter = symTable.getExternalSymbols();
+        while (iter.hasNext()) {
+            Symbol sym = iter.next();
+            if (sym.isExternalEntryPoint()) {
+                Map<String, Object> expData = new HashMap<>();
+                expData.put("name", sym.getName());
+                expData.put("address", sym.getAddress().toString());
+                exports.add(expData);
+            }
+        }
+        
+        Map<String, Object> response = new HashMap<>();
+        response.put("success", true);
+        Map<String, Object> result = new HashMap<>();
+        result.put("exports", exports);
+        result.put("count", exports.size());
+        response.put("result", result);
+        sendJsonResponse(exchange, response, 200);
+    }
+    
+    private void handleProgramEntryPoints(HttpExchange exchange) throws IOException {
+        SymbolTable symTable = program.getSymbolTable();
+        AddressIterator iter = symTable.getExternalEntryPointIterator();
+        
+        List<Map<String, Object>> entryPoints = new ArrayList<>();
+        while (iter.hasNext()) {
+            Address addr = iter.next();
+            Map<String, Object> epData = new HashMap<>();
+            epData.put("address", addr.toString());
+            
+            Symbol[] symbols = symTable.getSymbols(addr);
+            if (symbols.length > 0) {
+                epData.put("name", symbols[0].getName());
+            }
+            
+            Function func = program.getFunctionManager().getFunctionAt(addr);
+            if (func != null) {
+                epData.put("function", func.getName());
+            }
+            
+            entryPoints.add(epData);
+        }
+        
+        Map<String, Object> response = new HashMap<>();
+        response.put("success", true);
+        Map<String, Object> result = new HashMap<>();
+        result.put("entryPoints", entryPoints);
+        result.put("count", entryPoints.size());
+        response.put("result", result);
+        sendJsonResponse(exchange, response, 200);
+    }
+    
+    // ==================== SECTIONS ENDPOINTS (CRITICAL for network_config_discover) ====================
+    private void registerSectionEndpoints() {
+        server.createContext("/sections", exchange -> {
+            safeHandle(exchange, ex -> {
+                String method = ex.getRequestMethod();
+                String path = ex.getRequestURI().getPath();
+                String query = ex.getRequestURI().getQuery();
+                
+                if (!method.equals("GET")) {
+                    sendError(ex, 405, "Method not allowed");
+                    return;
+                }
+                
+                // Parse path: /sections or /sections/by-name/{name}/read
+                String[] segments = path.split("/");
+                
+                if (segments.length == 2 || (segments.length == 3 && segments[2].isEmpty())) {
+                    // /sections - list all sections
+                    handleListSections(ex);
+                } else if (segments.length >= 5 && segments[2].equals("by-name") && segments[4].equals("read")) {
+                    // /sections/by-name/{name}/read
+                    String sectionName = segments[3];
+                    handleReadSectionByName(ex, sectionName, query);
+                } else {
+                    sendError(ex, 404, "Unknown sections endpoint");
+                }
+            });
+        });
+    }
+    
+    private void handleListSections(HttpExchange exchange) throws IOException {
+        Memory memory = program.getMemory();
+        List<Map<String, Object>> sections = new ArrayList<>();
+        
+        for (MemoryBlock block : memory.getBlocks()) {
+            Map<String, Object> sectionData = new HashMap<>();
+            sectionData.put("name", block.getName());
+            sectionData.put("start", block.getStart().toString());
+            sectionData.put("end", block.getEnd().toString());
+            sectionData.put("size", block.getSize());
+            
+            // Build permissions string (rwx format expected by network_config_discover)
+            StringBuilder perms = new StringBuilder();
+            if (block.isRead()) perms.append("r");
+            if (block.isWrite()) perms.append("w");
+            if (block.isExecute()) perms.append("x");
+            String permString = perms.toString();
+            
+            sectionData.put("permissions", permString);
+            sectionData.put("flags", permString); // Alias for compatibility
+            sectionData.put("type", block.getType().toString());
+            sectionData.put("initialized", block.isInitialized());
+            sections.add(sectionData);
+        }
+        
+        Map<String, Object> response = new HashMap<>();
+        response.put("success", true);
+        response.put("result", sections);
+        sendJsonResponse(exchange, response, 200);
+    }
+    
+    private void handleReadSectionByName(HttpExchange exchange, String sectionName, String query) throws Exception {
+        Map<String, String> params = parseQuery(query);
+        String format = params.getOrDefault("format", "hex");
+        
+        Memory memory = program.getMemory();
+        MemoryBlock block = memory.getBlock(sectionName);
+        
+        if (block == null) {
+            sendError(exchange, 404, "Section not found: " + sectionName);
+            return;
+        }
+        
+        Map<String, Object> response = new HashMap<>();
+        response.put("success", true);
+        
+        Map<String, Object> result = new HashMap<>();
+        result.put("name", sectionName);
+        result.put("start", block.getStart().toString());
+        result.put("end", block.getEnd().toString());
+        result.put("size", block.getSize());
+        
+        // Read the section data with safety limit
+        long size = block.getSize();
+        boolean truncated = false;
+        if (size > 10 * 1024 * 1024) { // Limit to 10MB
+            size = 10 * 1024 * 1024;
+            truncated = true;
+        }
+        
+        byte[] bytes = new byte[(int)size];
+        memory.getBytes(block.getStart(), bytes);
+        
+        if ("base64".equalsIgnoreCase(format)) {
+            result.put("data", Base64.getEncoder().encodeToString(bytes));
+            result.put("format", "base64");
+        } else {
+            // Default to hex
+            StringBuilder hex = new StringBuilder();
+            for (byte b : bytes) {
+                hex.append(String.format("%02x", b));
+            }
+            result.put("data", hex.toString());
+            result.put("format", "hex");
+        }
+        
+        if (truncated) {
+            result.put("truncated", true);
+            result.put("truncated_at", size);
+        }
+        
+        response.put("result", result);
+        sendJsonResponse(exchange, response, 200);
+    }
+    
+    private void registerSegmentEndpoints() {
+        server.createContext("/segments", exchange -> {
+            handleListSegments(exchange);
+        });
+    }
+    
+    private void handleListSegments(HttpExchange exchange) throws IOException {
+        Memory memory = program.getMemory();
+        List<Map<String, Object>> segments = new ArrayList<>();
+        
+        for (MemoryBlock block : memory.getBlocks()) {
+            Map<String, Object> segData = new HashMap<>();
+            segData.put("name", block.getName());
+            segData.put("start", block.getStart().toString());
+            segData.put("end", block.getEnd().toString());
+            segData.put("size", block.getSize());
+            segData.put("read", block.isRead());
+            segData.put("write", block.isWrite());
+            segData.put("execute", block.isExecute());
+            segData.put("initialized", block.isInitialized());
+            segData.put("type", block.getType().toString());
+            segments.add(segData);
+        }
+        
+        Map<String, Object> response = new HashMap<>();
+        response.put("success", true);
+        Map<String, Object> result = new HashMap<>();
+        result.put("segments", segments);
+        result.put("count", segments.size());
+        response.put("result", result);
+        sendJsonResponse(exchange, response, 200);
+    }
+    
+    private void registerVariableEndpoints() {
+        server.createContext("/variables", exchange -> {
+            String path = exchange.getRequestURI().getPath();
+            
+            if (path.equals("/variables/global")) {
+                handleGlobalVariables(exchange);
+            } else {
+                sendError(exchange, 404, "Endpoint not found");
+            }
+        });
+    }
+    
+    private void handleGlobalVariables(HttpExchange exchange) throws IOException {
+        SymbolTable symTable = program.getSymbolTable();
+        List<Map<String, Object>> globals = new ArrayList<>();
+        
+        SymbolIterator iter = symTable.getAllSymbols(true);
+        while (iter.hasNext()) {
+            Symbol sym = iter.next();
+            if (sym.getSymbolType() == SymbolType.LABEL) {
+                Data data = program.getListing().getDataAt(sym.getAddress());
+                if (data != null) {
+                    Map<String, Object> varData = new HashMap<>();
+                    varData.put("name", sym.getName());
+                    varData.put("address", sym.getAddress().toString());
+                    varData.put("type", data.getDataType().getName());
+                    varData.put("length", data.getLength());
+                    globals.add(varData);
+                }
+            }
+        }
+        
+        Map<String, Object> response = new HashMap<>();
+        response.put("success", true);
+        Map<String, Object> result = new HashMap<>();
+        result.put("variables", globals);
+        result.put("count", globals.size());
+        response.put("result", result);
+        sendJsonResponse(exchange, response, 200);
+    }
+    
+    // ==================== COMMENTS ENDPOINTS ====================
+    private void registerCommentsEndpoints() {
+        server.createContext("/comments", exchange -> {
+            safeHandle(exchange, ex -> {
+                String query = ex.getRequestURI().getQuery();
+                Map<String, String> params = parseQuery(query);
+                String addr = params.get("address");
+                
+                if (addr != null) {
+                    handleGetComments(ex, addr);
+                } else {
+                    sendError(ex, 400, "Missing address parameter");
+                }
+            });
+        });
+    }
+    
+    private void handleGetComments(HttpExchange exchange, String addrStr) throws Exception {
+        Address addr = parseAddressString(addrStr);
+        Listing listing = program.getListing();
+        
+        Map<String, Object> comments = new HashMap<>();
+        comments.put("address", addrStr);
+        comments.put("plate", listing.getComment(CodeUnit.PLATE_COMMENT, addr));
+        comments.put("pre", listing.getComment(CodeUnit.PRE_COMMENT, addr));
+        comments.put("post", listing.getComment(CodeUnit.POST_COMMENT, addr));
+        comments.put("eol", listing.getComment(CodeUnit.EOL_COMMENT, addr));
+        comments.put("repeatable", listing.getComment(CodeUnit.REPEATABLE_COMMENT, addr));
+        
+        Map<String, Object> response = new HashMap<>();
+        response.put("success", true);
+        response.put("result", comments);
+        sendJsonResponse(exchange, response, 200);
+    }
+    
+    // ==================== ANALYSIS ENDPOINTS ====================
+    // ==================== ANALYSIS ENDPOINTS ====================
+    private void registerAnalysisEndpoints() {
+        server.createContext("/analysis", exchange -> {
+            safeHandle(exchange, ex -> {
+                String method = ex.getRequestMethod();
+                String path = ex.getRequestURI().getPath();
+                
+                if (!method.equals("GET")) {
+                    sendError(ex, 405, "Method not allowed");
+                    return;
+                }
+                
+                String[] segments = path.split("/");
+                
+                if (segments.length == 2 || (segments.length == 3 && segments[2].isEmpty())) {
+                    // /analysis or /analysis/
+                    handleAnalysisStatus(ex);
+                } else if (segments.length == 3 && segments[2].equals("status")) {
+                    // /analysis/status
+                    handleAnalysisStatus(ex);
+                } else {
+                    sendError(ex, 404, "Invalid analysis endpoint path");
+                }
+            });
+        });
+    }
+    
+    private void handleAnalysisStatus(HttpExchange exchange) throws Exception {
+        Map<String, Object> response = new HashMap<>();
+        response.put("success", true);
+        Map<String, Object> result = new HashMap<>();
+        
+        // Get analysis status
+        boolean analyzed = program.getOptions(Program.PROGRAM_INFO).getBoolean("Analyzed", false);
+        result.put("analyzed", analyzed);
+        result.put("programName", program.getName());
+        result.put("language", program.getLanguage().getLanguageID().getIdAsString());
+        result.put("compiler", program.getCompilerSpec().getCompilerSpecID().getIdAsString());
+        
+        // Get function count
+        result.put("functionCount", program.getFunctionManager().getFunctionCount());
+        
+        // Get symbol count
+        result.put("symbolCount", program.getSymbolTable().getNumSymbols());
+        
+        // Get memory info
+        Memory memory = program.getMemory();
+        result.put("memorySize", memory.getSize());
+        result.put("memoryBlocks", memory.getBlocks().length);
+        
+        response.put("result", result);
+        sendJsonResponse(exchange, response, 200);
+    }
+    
+    // ==================== CLASS ENDPOINTS ====================
+    // ==================== CLASS ENDPOINTS ====================
+    private void registerClassEndpoints() {
+        server.createContext("/classes", exchange -> {
+            safeHandle(exchange, ex -> {
+                String method = ex.getRequestMethod();
+                String path = ex.getRequestURI().getPath();
+                String query = ex.getRequestURI().getQuery();
+                
+                if (!method.equals("GET")) {
+                    sendError(ex, 405, "Method not allowed");
+                    return;
+                }
+                
+                // Parse path segments: /classes/[className]/[action]
+                String[] segments = path.split("/");
+                
+                if (segments.length == 2 || (segments.length == 3 && segments[2].isEmpty())) {
+                    // /classes or /classes/
+                    handleListClasses(ex, query);
+                } else if (segments.length == 3) {
+                    // /classes/{className}
+                    handleGetClass(ex, segments[2]);
+                } else if (segments.length == 4) {
+                    // /classes/{className}/{action}
+                    String className = segments[2];
+                    String action = segments[3];
+                    
+                    switch (action) {
+                        case "methods":
+                            handleClassMethods(ex, className);
+                            break;
+                        case "fields":
+                            handleClassFields(ex, className);
+                            break;
+                        default:
+                            sendError(ex, 404, "Unknown class action: " + action);
+                    }
+                } else {
+                    sendError(ex, 404, "Invalid class endpoint path");
+                }
+            });
+        });
+    }
+    
+    private void handleListClasses(HttpExchange exchange, String query) throws Exception {
+        SymbolTable symbolTable = program.getSymbolTable();
+        List<Map<String, Object>> classes = new ArrayList<>();
+        
+        // Find all class namespaces
+        SymbolIterator allSymbols = symbolTable.getAllSymbols(true);
+        Set<String> seenClasses = new HashSet<>();
+        
+        while (allSymbols.hasNext()) {
+            Symbol symbol = allSymbols.next();
+            Namespace ns = symbol.getParentNamespace();
+            
+            if (ns != null && ns instanceof GhidraClass && !seenClasses.contains(ns.getName())) {
+                seenClasses.add(ns.getName());
+                
+                Map<String, Object> classData = new HashMap<>();
+                classData.put("name", ns.getName());
+                classData.put("namespace", ns.getParentNamespace().getName());
+                classes.add(classData);
+            }
+        }
+        
+        Map<String, Object> response = new HashMap<>();
+        response.put("success", true);
+        Map<String, Object> result = new HashMap<>();
+        result.put("classes", classes);
+        result.put("count", classes.size());
+        response.put("result", result);
+        sendJsonResponse(exchange, response, 200);
+    }
+    
+    private void handleGetClass(HttpExchange exchange, String className) throws Exception {
+        SymbolTable symbolTable = program.getSymbolTable();
+        
+        // Find the class namespace
+        List<Symbol> symbols = symbolTable.getGlobalSymbols(className);
+        Namespace classNamespace = null;
+        
+        for (Symbol sym : symbols) {
+            if (sym.getObject() instanceof Namespace) {
+                Namespace ns = (Namespace) sym.getObject();
+                if (ns instanceof GhidraClass) {
+                    classNamespace = ns;
+                    break;
+                }
+            }
+        }
+        
+        if (classNamespace == null) {
+            sendError(exchange, 404, "Class not found: " + className);
+            return;
+        }
+        
+        Map<String, Object> response = new HashMap<>();
+        response.put("success", true);
+        Map<String, Object> result = new HashMap<>();
+        result.put("name", classNamespace.getName());
+        result.put("namespace", classNamespace.getParentNamespace().getName());
+        response.put("result", result);
+        sendJsonResponse(exchange, response, 200);
+    }
+    
+    private void handleClassMethods(HttpExchange exchange, String className) throws Exception {
+        SymbolTable symbolTable = program.getSymbolTable();
+        FunctionManager funcMgr = program.getFunctionManager();
+        List<Map<String, Object>> methods = new ArrayList<>();
+        
+        // Find all functions in the class namespace
+        SymbolIterator allSymbols = symbolTable.getAllSymbols(true);
+        
+        while (allSymbols.hasNext()) {
+            Symbol symbol = allSymbols.next();
+            
+            if (symbol.getSymbolType() == SymbolType.FUNCTION) {
+                Namespace parent = symbol.getParentNamespace();
+                if (parent != null && parent.getName().equals(className)) {
+                    Function func = funcMgr.getFunctionAt(symbol.getAddress());
+                    if (func != null) {
+                        Map<String, Object> methodData = new HashMap<>();
+                        methodData.put("name", func.getName());
+                        methodData.put("address", func.getEntryPoint().toString());
+                        methodData.put("signature", func.getPrototypeString(true, false));
+                        methods.add(methodData);
+                    }
+                }
+            }
+        }
+        
+        Map<String, Object> response = new HashMap<>();
+        response.put("success", true);
+        Map<String, Object> result = new HashMap<>();
+        result.put("className", className);
+        result.put("methods", methods);
+        result.put("count", methods.size());
+        response.put("result", result);
+        sendJsonResponse(exchange, response, 200);
+    }
+    
+    private void handleClassFields(HttpExchange exchange, String className) throws Exception {
+        // For now, return empty fields (would need more complex logic to detect fields)
+        Map<String, Object> response = new HashMap<>();
+        response.put("success", true);
+        Map<String, Object> result = new HashMap<>();
+        result.put("className", className);
+        result.put("fields", new ArrayList<>());
+        result.put("count", 0);
+        result.put("message", "Field detection not yet implemented in headless mode");
+        response.put("result", result);
+        sendJsonResponse(exchange, response, 200);
+    }
+    
+    // ==================== HELPER METHODS ====================
+    
+    /**
+     * Parse address from various formats: 005f1030, 0x005f1030, 0X005F1030
+     */
+    private Address parseAddressString(String addrStr) throws Exception {
+        if (addrStr == null || addrStr.isEmpty()) {
+            throw new IllegalArgumentException("Address cannot be null or empty");
+        }
+        
+        // Remove 0x or 0X prefix if present
+        String cleanAddr = addrStr;
+        if (addrStr.toLowerCase().startsWith("0x")) {
+            cleanAddr = addrStr.substring(2);
+        }
+        
+        // Ensure it's valid hex
+        if (!cleanAddr.matches("[0-9a-fA-F]+")) {
+            throw new IllegalArgumentException("Invalid hex address: " + addrStr);
+        }
+        
+        try {
+            return program.getAddressFactory().getAddress(cleanAddr);
+        } catch (Exception e) {
+            throw new IllegalArgumentException("Cannot parse address: " + addrStr + " - " + e.getMessage());
+        }
+    }
+    
+    /**
+     * Log incoming request for debugging
+     */
+    private void logRequest(HttpExchange exchange) {
+        String method = exchange.getRequestMethod();
+        String path = exchange.getRequestURI().getPath();
+        String query = exchange.getRequestURI().getQuery();
+        String logMsg = String.format("[%s] %s%s", method, path, query != null ? "?" + query : "");
+        println(logMsg);
+    }
+    
+    /**
+     * Safe handler wrapper that catches exceptions and returns proper errors
+     */
+    private void safeHandle(HttpExchange exchange, ThrowingConsumer<HttpExchange> handler) {
+        try {
+            logRequest(exchange);
+            handler.accept(exchange);
+        } catch (IllegalArgumentException e) {
+            try {
+                sendError(exchange, 400, e.getMessage());
+            } catch (IOException ioe) {
+                println("ERROR: Failed to send error response: " + ioe.getMessage());
+            }
+        } catch (Exception e) {
+            try {
+                println("ERROR: " + e.getMessage());
+                e.printStackTrace();
+                sendError(exchange, 500, "Internal server error: " + e.getMessage());
+            } catch (IOException ioe) {
+                println("ERROR: Failed to send error response: " + ioe.getMessage());
+            }
+        }
+    }
+    
+    @FunctionalInterface
+    interface ThrowingConsumer<T> {
+        void accept(T t) throws Exception;
+    }
+    
+    private void sendJsonResponse(HttpExchange exchange, Object data, int statusCode) throws IOException {
+        String json = toJson(data);
+        byte[] bytes = json.getBytes("UTF-8");
+        
+        exchange.getResponseHeaders().set("Content-Type", "application/json");
+        exchange.getResponseHeaders().set("Access-Control-Allow-Origin", "*");
+        exchange.sendResponseHeaders(statusCode, bytes.length);
+        
+        try (OutputStream os = exchange.getResponseBody()) {
+            os.write(bytes);
+        }
+    }
+    
+    private void sendError(HttpExchange exchange, int statusCode, String message) throws IOException {
+        Map<String, Object> error = new HashMap<>();
+        error.put("success", false);
+        error.put("error", message);
+        sendJsonResponse(exchange, error, statusCode);
+    }
+    
+    private Map<String, String> parseQuery(String query) {
+        Map<String, String> params = new HashMap<>();
+        if (query != null && !query.isEmpty()) {
+            String[] pairs = query.split("&");
+            for (String pair : pairs) {
+                String[] kv = pair.split("=", 2);
+                if (kv.length == 2) {
+                    params.put(kv[0], kv[1]);
+                }
+            }
+        }
+        return params;
+    }
+    
+    private String toJson(Object obj) {
+        if (obj instanceof Map) {
+            return mapToJson((Map<String, Object>) obj);
+        } else if (obj instanceof List) {
+            return listToJson((List<?>) obj);
+        }
+        return "{}";
+    }
+    
+    private String mapToJson(Map<String, Object> map) {
+        StringBuilder sb = new StringBuilder("{");
+        boolean first = true;
+        for (Map.Entry<String, Object> entry : map.entrySet()) {
+            if (!first) sb.append(",");
+            first = false;
+            sb.append("\"").append(escapeJson(entry.getKey())).append("\":");
+            
+            Object value = entry.getValue();
+            if (value instanceof String) {
+                sb.append("\"").append(escapeJson((String) value)).append("\"");
+            } else if (value instanceof Map) {
+                sb.append(mapToJson((Map<String, Object>) value));
+            } else if (value instanceof List) {
+                sb.append(listToJson((List<?>) value));
+            } else if (value instanceof Boolean || value instanceof Number) {
+                sb.append(value.toString());
+            } else {
+                sb.append("\"").append(escapeJson(value.toString())).append("\"");
+            }
+        }
+        sb.append("}");
+        return sb.toString();
+    }
+    
+    private String listToJson(List<?> list) {
+        StringBuilder sb = new StringBuilder("[");
+        boolean first = true;
+        for (Object item : list) {
+            if (!first) sb.append(",");
+            first = false;
+            
+            if (item instanceof String) {
+                sb.append("\"").append(escapeJson((String) item)).append("\"");
+            } else if (item instanceof Map) {
+                sb.append(mapToJson((Map<String, Object>) item));
+            } else if (item instanceof List) {
+                sb.append(listToJson((List<?>) item));
+            } else {
+                sb.append("\"").append(escapeJson(item.toString())).append("\"");
+            }
+        }
+        sb.append("]");
+        return sb.toString();
+    }
+    
+    private String escapeJson(String str) {
+        if (str == null) return "";
+        return str.replace("\\", "\\\\")
+                  .replace("\"", "\\\"")
+                  .replace("\n", "\\n")
+                  .replace("\r", "\\r")
+                  .replace("\t", "\\t");
+    }
+}

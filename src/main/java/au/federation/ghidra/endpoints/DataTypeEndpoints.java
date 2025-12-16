@@ -19,16 +19,8 @@ import java.util.*;
  */
 public class DataTypeEndpoints extends AbstractEndpoint {
 
-    private final PluginTool tool;
-
-    public DataTypeEndpoints(Program program, int port, PluginTool tool) {
-        super(program, port);
-        this.tool = tool;
-    }
-
-    @Override
-    protected PluginTool getTool() {
-        return tool;
+    public DataTypeEndpoints(au.federation.ghidra.PluginState pluginState) {
+        super(pluginState);
     }
 
     @Override
@@ -44,7 +36,7 @@ public class DataTypeEndpoints extends AbstractEndpoint {
                 sendErrorResponse(exchange, 405, "Method Not Allowed", "METHOD_NOT_ALLOWED");
                 return;
             }
-            ResponseBuilder builder = new ResponseBuilder(exchange, port)
+            ResponseBuilder builder = new ResponseBuilder(exchange, getPort())
                 .success(true)
                 .result(Map.of(
                     "message", "DataType API",
@@ -78,7 +70,7 @@ public class DataTypeEndpoints extends AbstractEndpoint {
                     m.put("length", en.getLength());
                     out.add(m);
                 }
-                ResponseBuilder rb = new ResponseBuilder(exchange, port)
+                ResponseBuilder rb = new ResponseBuilder(exchange, getPort())
                     .success(true)
                     .result(out)
                     .addLink("self", "/datatypes/enums");
@@ -117,7 +109,7 @@ public class DataTypeEndpoints extends AbstractEndpoint {
                     return (ghidra.program.model.data.Enum) dtm.addDataType(edt, DataTypeConflictHandler.DEFAULT_HANDLER);
                 });
 
-                ResponseBuilder rb = new ResponseBuilder(exchange, port)
+                ResponseBuilder rb = new ResponseBuilder(exchange, getPort())
                     .success(true)
                     .result(Map.of(
                         "name", created.getName(),
@@ -210,7 +202,7 @@ public class DataTypeEndpoints extends AbstractEndpoint {
                 }
                 res.put("members", members);
 
-                ResponseBuilder rb = new ResponseBuilder(exchange, port)
+                ResponseBuilder rb = new ResponseBuilder(exchange, getPort())
                     .success(true)
                     .result(res)
                     .addLink("self", "/datatypes/enums/" + urlEncode(enumPath));
@@ -266,7 +258,7 @@ public class DataTypeEndpoints extends AbstractEndpoint {
                 for (String n : updated.getNames()) { members.put(n, updated.getValue(n)); }
                 res.put("members", members);
 
-                ResponseBuilder rb = new ResponseBuilder(exchange, port)
+                ResponseBuilder rb = new ResponseBuilder(exchange, getPort())
                     .success(true)
                     .result(res)
                     .addLink("self", "/datatypes/enums/" + urlEncode(enumPath));

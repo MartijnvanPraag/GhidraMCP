@@ -15,21 +15,8 @@ package au.federation.ghidra.endpoints;
 
     public class SymbolEndpoints extends AbstractEndpoint {
 
-        private PluginTool tool;
-        
-        // Updated constructor to accept port
-        public SymbolEndpoints(Program program, int port) {
-            super(program, port); // Call super constructor
-        }
-        
-        public SymbolEndpoints(Program program, int port, PluginTool tool) {
-            super(program, port);
-            this.tool = tool;
-        }
-        
-        @Override
-        protected PluginTool getTool() {
-            return tool;
+        public SymbolEndpoints(au.federation.ghidra.PluginState pluginState) {
+            super(pluginState);
         }
 
         @Override
@@ -76,7 +63,7 @@ package au.federation.ghidra.endpoints;
                     }
                     
                     // Build response with HATEOAS links
-                    au.federation.ghidra.api.ResponseBuilder builder = new au.federation.ghidra.api.ResponseBuilder(exchange, port)
+                    au.federation.ghidra.api.ResponseBuilder builder = new au.federation.ghidra.api.ResponseBuilder(exchange, getPort())
                         .success(true);
                     
                     // Apply pagination and get paginated items
@@ -128,7 +115,7 @@ package au.federation.ghidra.endpoints;
                     }
                     
                     // Build response with HATEOAS links
-                    au.federation.ghidra.api.ResponseBuilder builder = new au.federation.ghidra.api.ResponseBuilder(exchange, port)
+                    au.federation.ghidra.api.ResponseBuilder builder = new au.federation.ghidra.api.ResponseBuilder(exchange, getPort())
                         .success(true);
                     
                     // Apply pagination and get paginated items
@@ -187,7 +174,7 @@ package au.federation.ghidra.endpoints;
                     }
                     
                     // Build response with HATEOAS links
-                    au.federation.ghidra.api.ResponseBuilder builder = new au.federation.ghidra.api.ResponseBuilder(exchange, port)
+                    au.federation.ghidra.api.ResponseBuilder builder = new au.federation.ghidra.api.ResponseBuilder(exchange, getPort())
                         .success(true);
                     
                     // Apply pagination and get paginated items

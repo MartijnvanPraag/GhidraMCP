@@ -87,51 +87,41 @@ public abstract class AbstractEndpoint implements GhidraJsonEndpoint {
     }
 
     protected final Gson gson = new Gson(); // Keep Gson if needed for specific object handling
-    protected Program currentProgram;
-    protected int port; // Add port field
+    protected au.federation.ghidra.PluginState pluginState; // Reference to plugin state abstraction
 
-    // Constructor to receive Program and Port
-    public AbstractEndpoint(Program program, int port) {
-        this.currentProgram = program;
-        this.port = port;
+    // Constructor to receive PluginState
+    public AbstractEndpoint(au.federation.ghidra.PluginState pluginState) {
+        this.pluginState = pluginState;
     }
     
-    // Get the current program - dynamically checks for program availability at runtime
+    // Get the current program - uses PluginState abstraction
     protected Program getCurrentProgram() {
-        // ALWAYS try to get the current program from the tool first, regardless of the stored program
-        // This ensures we get the most up-to-date program state
-        try {
-            PluginTool tool = getTool();
-            if (tool != null) {
-                ProgramManager programManager = tool.getService(ProgramManager.class);
-                if (programManager != null) {
-                    Program current = programManager.getCurrentProgram();
-                    if (current != null) {
-                        return current; // Return the current program from the tool
-                    }
-                }
-            }
-        } catch (Exception e) {
-            Msg.error(this, "Error getting current program from tool", e);
+        if (pluginState != null) {
+            return pluginState.getCurrentProgram();
         }
-        
-        // Only fall back to the stored program if dynamic lookup fails
-        if (currentProgram != null) {
-            return currentProgram;
-        }
-        
         return null;
     }
     
-    // Can be overridden by subclasses that have a tool reference
+    // Get the tool - uses PluginState abstraction
     protected PluginTool getTool() {
+        if (pluginState != null) {
+            return pluginState.getTool();
+        }
         return null;
+    }
+    
+    // Get the port from PluginState
+    protected int getPort() {
+        if (pluginState != null) {
+            return pluginState.getPort();
+        }
+        return 8192; // Default fallback
     }
 
     // --- Methods using HttpUtil ---
 
     protected void sendJsonResponse(HttpExchange exchange, JsonObject data, int statusCode) throws IOException {
-        HttpUtil.sendJsonResponse(exchange, data, statusCode, this.port);
+        HttpUtil.sendJsonResponse(exchange, data, statusCode, getPort());
     }
     
     // Overload for sending success responses easily using ResponseBuilder
@@ -139,11 +129,11 @@ public abstract class AbstractEndpoint implements GhidraJsonEndpoint {
         // No longer check if program is required here
         // Each handler method should check for program availability at runtime if needed
         
-        ResponseBuilder builder = new ResponseBuilder(exchange, port)
+        ResponseBuilder builder = new ResponseBuilder(exchange, getPort())
             .success(true)
             .result(resultData);
         // Add common links if desired here
-        HttpUtil.sendJsonResponse(exchange, builder.build(), 200, this.port);
+        HttpUtil.sendJsonResponse(exchange, builder.build(), 200, getPort());
     }
     
     /**
@@ -156,12 +146,12 @@ public abstract class AbstractEndpoint implements GhidraJsonEndpoint {
     }
 
     protected void sendErrorResponse(HttpExchange exchange, int code, String message, String errorCode) throws IOException {
-        HttpUtil.sendErrorResponse(exchange, code, message, errorCode, this.port);
+        HttpUtil.sendErrorResponse(exchange, code, message, errorCode, getPort());
     }
     
     // Overload without error code
     protected void sendErrorResponse(HttpExchange exchange, int code, String message) throws IOException {
-        HttpUtil.sendErrorResponse(exchange, code, message, null, this.port);
+        HttpUtil.sendErrorResponse(exchange, code, message, null, getPort());
     }
 
     protected Map<String, String> parseQueryParams(HttpExchange exchange) {

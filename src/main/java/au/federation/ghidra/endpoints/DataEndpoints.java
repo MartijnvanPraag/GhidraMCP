@@ -25,21 +25,8 @@ package au.federation.ghidra.endpoints;
 
     public class DataEndpoints extends AbstractEndpoint {
 
-        private PluginTool tool;
-        
-        // Updated constructor to accept port
-        public DataEndpoints(Program program, int port) {
-            super(program, port); // Call super constructor
-        }
-        
-        public DataEndpoints(Program program, int port, PluginTool tool) {
-            super(program, port);
-            this.tool = tool;
-        }
-        
-        @Override
-        protected PluginTool getTool() {
-            return tool;
+        public DataEndpoints(au.federation.ghidra.PluginState pluginState) {
+            super(pluginState);
         }
 
         @Override
@@ -213,7 +200,7 @@ package au.federation.ghidra.endpoints;
                 }
                 
                 // Build response with HATEOAS links
-                au.federation.ghidra.api.ResponseBuilder builder = new au.federation.ghidra.api.ResponseBuilder(exchange, port)
+                au.federation.ghidra.api.ResponseBuilder builder = new au.federation.ghidra.api.ResponseBuilder(exchange, getPort())
                     .success(true);
                 
                 // Apply pagination and get paginated items
@@ -386,7 +373,7 @@ package au.federation.ghidra.endpoints;
                     resultMap.put("message", message);
                     
                     // Build HATEOAS response
-                    au.federation.ghidra.api.ResponseBuilder builder = new au.federation.ghidra.api.ResponseBuilder(exchange, port)
+                    au.federation.ghidra.api.ResponseBuilder builder = new au.federation.ghidra.api.ResponseBuilder(exchange, getPort())
                         .success(true)
                         .result(resultMap);
                     
@@ -556,7 +543,7 @@ package au.federation.ghidra.endpoints;
                     resultMap.put("message", "Data type changed successfully");
                     
                     // Build HATEOAS response
-                    au.federation.ghidra.api.ResponseBuilder builder = new au.federation.ghidra.api.ResponseBuilder(exchange, port)
+                    au.federation.ghidra.api.ResponseBuilder builder = new au.federation.ghidra.api.ResponseBuilder(exchange, getPort())
                         .success(true)
                         .result(resultMap);
                     
@@ -734,7 +721,7 @@ package au.federation.ghidra.endpoints;
                     resultMap.put("message", message);
                     
                     // Build HATEOAS response
-                    au.federation.ghidra.api.ResponseBuilder builder = new au.federation.ghidra.api.ResponseBuilder(exchange, port)
+                    au.federation.ghidra.api.ResponseBuilder builder = new au.federation.ghidra.api.ResponseBuilder(exchange, getPort())
                         .success(true)
                         .result(resultMap);
                     
@@ -1057,7 +1044,7 @@ package au.federation.ghidra.endpoints;
                     resultMap.put("message", "Data created successfully");
                     
                     // Build HATEOAS response
-                    au.federation.ghidra.api.ResponseBuilder builder = new au.federation.ghidra.api.ResponseBuilder(exchange, port)
+                    au.federation.ghidra.api.ResponseBuilder builder = new au.federation.ghidra.api.ResponseBuilder(exchange, getPort())
                         .success(true)
                         .result(resultMap);
                     
@@ -1189,7 +1176,7 @@ package au.federation.ghidra.endpoints;
                         });
                         
                         // Build HATEOAS response
-                        au.federation.ghidra.api.ResponseBuilder builder = new au.federation.ghidra.api.ResponseBuilder(exchange, port)
+                        au.federation.ghidra.api.ResponseBuilder builder = new au.federation.ghidra.api.ResponseBuilder(exchange, getPort())
                             .success(true)
                             .result(result);
                         
@@ -1289,7 +1276,7 @@ package au.federation.ghidra.endpoints;
                     resultMap.put("message", "Data deleted successfully");
                     
                     // Build HATEOAS response
-                    au.federation.ghidra.api.ResponseBuilder builder = new au.federation.ghidra.api.ResponseBuilder(exchange, port)
+                    au.federation.ghidra.api.ResponseBuilder builder = new au.federation.ghidra.api.ResponseBuilder(exchange, getPort())
                         .success(true)
                         .result(resultMap);
                     
@@ -1389,7 +1376,7 @@ package au.federation.ghidra.endpoints;
                 }
                 
                 // Build response with HATEOAS links
-                au.federation.ghidra.api.ResponseBuilder builder = new au.federation.ghidra.api.ResponseBuilder(exchange, port)
+                au.federation.ghidra.api.ResponseBuilder builder = new au.federation.ghidra.api.ResponseBuilder(exchange, getPort())
                     .success(true);
                 
                 // Apply pagination and get paginated items

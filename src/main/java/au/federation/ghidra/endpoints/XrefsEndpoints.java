@@ -22,22 +22,10 @@ import java.util.*;
 
 public class XrefsEndpoints extends AbstractEndpoint {
 
-    private PluginTool tool;
-    
-    public XrefsEndpoints(Program program, int port) {
-        super(program, port);
+    public XrefsEndpoints(au.federation.ghidra.PluginState pluginState) {
+        super(pluginState);
     }
-    
-    public XrefsEndpoints(Program program, int port, PluginTool tool) {
-        super(program, port);
-        this.tool = tool;
-    }
-    
-    @Override
-    protected PluginTool getTool() {
-        return tool;
-    }
-    
+
     /**
      * Helper method to convert ReferenceIterator to an iterable collection
      */
@@ -78,7 +66,7 @@ public class XrefsEndpoints extends AbstractEndpoint {
                 }
                 
                 // Create ResponseBuilder for HATEOAS-compliant response
-                ResponseBuilder builder = new ResponseBuilder(exchange, port)
+                ResponseBuilder builder = new ResponseBuilder(exchange, getPort())
                     .success(true)
                     .addLink("self", "/xrefs" + (exchange.getRequestURI().getRawQuery() != null ? 
                         "?" + exchange.getRequestURI().getRawQuery() : ""));

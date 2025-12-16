@@ -30,16 +30,8 @@ import java.util.Map;
  */
 public class ProgramEndpoints extends AbstractEndpoint {
 
-    private final PluginTool tool;
-
-    public ProgramEndpoints(Program program, int port, PluginTool tool) {
-        super(program, port);
-        this.tool = tool;
-    }
-    
-    @Override
-    protected PluginTool getTool() {
-        return tool;
+    public ProgramEndpoints(au.federation.ghidra.PluginState pluginState) {
+        super(pluginState);
     }
 
     @Override
@@ -70,7 +62,7 @@ public class ProgramEndpoints extends AbstractEndpoint {
         int limit = parseIntOrDefault(params.get("limit"), 100);
         
         List<ProgramInfo> programs = new ArrayList<>();
-        Project project = tool.getProject();
+        Project project = getTool().getProject();
         
         if (project == null) {
             sendErrorResponse(exchange, 503, "No project is currently open", "NO_PROJECT_OPEN");
@@ -110,7 +102,7 @@ public class ProgramEndpoints extends AbstractEndpoint {
             : new ArrayList<>();
         
         // Build response with pagination links
-        ResponseBuilder builder = new ResponseBuilder(exchange, port)
+        ResponseBuilder builder = new ResponseBuilder(exchange, getPort())
             .success(true)
             .result(paginatedPrograms);
         
@@ -205,7 +197,7 @@ public class ProgramEndpoints extends AbstractEndpoint {
         String projectName = parts[0];
         String filePath = parts[1];
         
-        Project project = tool.getProject();
+        Project project = getTool().getProject();
         
         if (project == null) {
             sendErrorResponse(exchange, 503, "No project is currently open", "NO_PROJECT_OPEN");
@@ -235,7 +227,7 @@ public class ProgramEndpoints extends AbstractEndpoint {
         ProgramInfo info = getProgramInfo(file);
         
         // Build response with HATEOAS links
-        ResponseBuilder builder = new ResponseBuilder(exchange, port)
+        ResponseBuilder builder = new ResponseBuilder(exchange, getPort())
             .success(true)
             .result(info);
         
@@ -285,14 +277,14 @@ public class ProgramEndpoints extends AbstractEndpoint {
                 ProgramInfo info = getCurrentProgramInfo();
                 
                 // Build response with HATEOAS links
-                ResponseBuilder builder = new ResponseBuilder(exchange, port)
+                ResponseBuilder builder = new ResponseBuilder(exchange, getPort())
                     .success(true)
                     .result(info);
                 
                 // Add HATEOAS links
                 builder.addLink("self", "/program");
                 
-                Project project = tool.getProject();
+                Project project = getTool().getProject();
                 if (project != null) {
                     builder.addLink("project", "/projects/" + project.getName());
                 }
@@ -307,6 +299,8 @@ public class ProgramEndpoints extends AbstractEndpoint {
                 builder.addLink("analysis", "/analysis");
                 
                 sendJsonResponse(exchange, builder.build(), 200);
+            } else if ("PATCH".equals(method)) {
+                handlePatchProgram(exchange);
             } else {
                 sendErrorResponse(exchange, 405, "Method Not Allowed", "METHOD_NOT_ALLOWED");
             }
@@ -314,6 +308,86 @@ public class ProgramEndpoints extends AbstractEndpoint {
             Msg.error(this, "Error handling /programs/current endpoint", e);
             sendErrorResponse(exchange, 500, "Internal Server Error: " + e.getMessage(), "INTERNAL_ERROR");
         }
+    }
+
+    /**
+     * Handle PATCH requests to update program properties (e.g., image base)
+     */
+    private void handlePatchProgram(HttpExchange exchange) throws IOException {
+        Program program = getCurrentProgram();
+        if (program == null) {
+            sendErrorResponse(exchange, 404, "No program is currently open", "NO_PROGRAM_OPEN");
+            return;
+        }
+
+        // Parse request body
+        Map<String, String> params = parseJsonPostParams(exchange);
+        String newImageBase = params.get("imageBase");
+        if (newImageBase == null) {
+            newImageBase = params.get("image_base");
+        }
+
+        if (newImageBase == null || newImageBase.isEmpty()) {
+            sendErrorResponse(exchange, 400, "No changes specified. Supported fields: imageBase", "NO_CHANGES");
+            return;
+        }
+
+        // Parse the new image base address
+        Address newBase;
+        try {
+            newBase = program.getAddressFactory().getAddress(newImageBase);
+            if (newBase == null) {
+                sendErrorResponse(exchange, 400, "Invalid address format: " + newImageBase, "INVALID_ADDRESS");
+                return;
+            }
+        } catch (Exception e) {
+            sendErrorResponse(exchange, 400, "Invalid address format: " + newImageBase + " - " + e.getMessage(), "INVALID_ADDRESS");
+            return;
+        }
+
+        // Set the new image base within a transaction using reflection to avoid compile-time dependency on LockException
+        final Address finalNewBase = newBase;
+        try {
+            TransactionHelper.executeInTransaction(program, "Set Image Base", () -> {
+                try {
+                    java.lang.reflect.Method setImageBaseMethod = program.getClass().getMethod("setImageBase", Address.class, boolean.class);
+                    setImageBaseMethod.invoke(program, finalNewBase, true);
+                } catch (java.lang.reflect.InvocationTargetException e) {
+                    throw new RuntimeException("Failed to set image base: " + e.getCause().getMessage(), e.getCause());
+                } catch (Exception e) {
+                    throw new RuntimeException("Failed to set image base: " + e.getMessage(), e);
+                }
+                return true;
+            });
+        } catch (Exception e) {
+            Msg.error(this, "Failed to set image base", e);
+            sendErrorResponse(exchange, 500, "Failed to set image base: " + e.getMessage(), "SET_IMAGE_BASE_FAILED");
+            return;
+        }
+
+        // Return updated program info
+        ProgramInfo info = getCurrentProgramInfo();
+
+        ResponseBuilder builder = new ResponseBuilder(exchange, getPort())
+            .success(true)
+            .result(info);
+
+        builder.addLink("self", "/program");
+
+        Project project = getTool().getProject();
+        if (project != null) {
+            builder.addLink("project", "/projects/" + project.getName());
+        }
+
+        builder.addLink("functions", "/functions");
+        builder.addLink("symbols", "/symbols");
+        builder.addLink("data", "/data");
+        builder.addLink("segments", "/segments");
+        builder.addLink("memory", "/memory");
+        builder.addLink("xrefs", "/xrefs");
+        builder.addLink("analysis", "/analysis");
+
+        sendJsonResponse(exchange, builder.build(), 200);
     }
     
     private void handleCurrentSegments(HttpExchange exchange) throws IOException {
@@ -357,7 +431,7 @@ public class ProgramEndpoints extends AbstractEndpoint {
             String functionAddress = fullPath.substring(0, slashIndex);
             String resource = fullPath.substring(slashIndex + 1);
             
-            FunctionEndpoints functionEndpoints = new FunctionEndpoints(program, port);
+            FunctionEndpoints functionEndpoints = new FunctionEndpoints(pluginState);
             
             // Find the function by address
             try {
@@ -384,7 +458,7 @@ public class ProgramEndpoints extends AbstractEndpoint {
             }
         } else {
             // Handle a direct function request without a sub-resource
-            FunctionEndpoints functionEndpoints = new FunctionEndpoints(program, port);
+            FunctionEndpoints functionEndpoints = new FunctionEndpoints(pluginState);
             
             try {
                 ghidra.program.model.address.Address address = program.getAddressFactory().getAddress(fullPath);
@@ -423,7 +497,7 @@ public class ProgramEndpoints extends AbstractEndpoint {
             String functionName = fullPath.substring(0, slashIndex);
             String resource = fullPath.substring(slashIndex + 1);
             
-            FunctionEndpoints functionEndpoints = new FunctionEndpoints(program, port);
+            FunctionEndpoints functionEndpoints = new FunctionEndpoints(pluginState);
             
             // Find the function by name
             ghidra.program.model.listing.Function function = null;
@@ -447,7 +521,7 @@ public class ProgramEndpoints extends AbstractEndpoint {
             }
         } else {
             // Handle a direct function request by name
-            FunctionEndpoints functionEndpoints = new FunctionEndpoints(program, port);
+            FunctionEndpoints functionEndpoints = new FunctionEndpoints(pluginState);
             functionEndpoints.handleGetFunction(exchange, fullPath);
         }
     }
@@ -489,7 +563,7 @@ public class ProgramEndpoints extends AbstractEndpoint {
             String projectName = parts[0];
             String filePath = parts[1];
             
-            Project project = tool.getProject();
+            Project project = getTool().getProject();
             
             if (project == null) {
                 sendErrorResponse(exchange, 503, "No project is currently open", "NO_PROJECT_OPEN");
@@ -572,7 +646,7 @@ public class ProgramEndpoints extends AbstractEndpoint {
      * Helper method to check if a program is open
      */
     private boolean isProgramOpen(DomainFile file) {
-        ProgramManager programManager = tool.getService(ProgramManager.class);
+        ProgramManager programManager = getTool().getService(ProgramManager.class);
         if (programManager == null) {
             return false;
         }
@@ -590,7 +664,7 @@ public class ProgramEndpoints extends AbstractEndpoint {
      * Helper method to get an open program by domain file
      */
     private Program getOpenProgram(DomainFile file) {
-        ProgramManager programManager = tool.getService(ProgramManager.class);
+        ProgramManager programManager = getTool().getService(ProgramManager.class);
         if (programManager == null) {
             return null;
         }
@@ -608,7 +682,7 @@ public class ProgramEndpoints extends AbstractEndpoint {
      * Helper method to get program info for a domain file
      */
     private ProgramInfo getProgramInfo(DomainFile file) {
-        Project project = tool.getProject();
+        Project project = getTool().getProject();
         String programId = project.getName() + ":" + file.getPathname();
         
         // Check if the program is open
@@ -651,7 +725,7 @@ public class ProgramEndpoints extends AbstractEndpoint {
             return null;
         }
         
-        Project project = tool.getProject();
+        Project project = getTool().getProject();
         String projectName = project != null ? project.getName() : "unknown";
         String programId = projectName + ":" + program.getDomainFile().getPathname();
         
@@ -682,7 +756,7 @@ public class ProgramEndpoints extends AbstractEndpoint {
      * Handle function resources like /programs/{program_id}/functions
      */
     private void handleFunctionResource(HttpExchange exchange, Program program, String path) throws IOException {
-        FunctionEndpoints functionEndpoints = new FunctionEndpoints(program, port);
+        FunctionEndpoints functionEndpoints = new FunctionEndpoints(pluginState);
         
         if (path.isEmpty() || path.equals("/")) {
             functionEndpoints.handleFunctions(exchange);
@@ -772,7 +846,7 @@ public class ProgramEndpoints extends AbstractEndpoint {
                     : new ArrayList<>();
                 
                 // Build response
-                ResponseBuilder builder = new ResponseBuilder(exchange, port)
+                ResponseBuilder builder = new ResponseBuilder(exchange, getPort())
                     .success(true)
                     .result(paginatedSegments);
                 
@@ -853,7 +927,7 @@ public class ProgramEndpoints extends AbstractEndpoint {
                 }
                 
                 // Build response
-                ResponseBuilder builder = new ResponseBuilder(exchange, port)
+                ResponseBuilder builder = new ResponseBuilder(exchange, getPort())
                     .success(true)
                     .result(segment);
                 
@@ -936,7 +1010,7 @@ public class ProgramEndpoints extends AbstractEndpoint {
                 result.put("format", format);
                 result.put("bytes", formattedBytes);
                 
-                ResponseBuilder builder = new ResponseBuilder(exchange, port)
+                ResponseBuilder builder = new ResponseBuilder(exchange, getPort())
                     .success(true)
                     .result(result);
                 
@@ -992,7 +1066,7 @@ public class ProgramEndpoints extends AbstractEndpoint {
                 result.put("length", bytes.length);
                 result.put("bytesWritten", bytes.length);
                 
-                ResponseBuilder builder = new ResponseBuilder(exchange, port)
+                ResponseBuilder builder = new ResponseBuilder(exchange, getPort())
                     .success(true)
                     .result(result);
                 
@@ -1136,7 +1210,7 @@ public class ProgramEndpoints extends AbstractEndpoint {
                 : new ArrayList<>();
             
             // Build response
-            ResponseBuilder builder = new ResponseBuilder(exchange, port)
+            ResponseBuilder builder = new ResponseBuilder(exchange, getPort())
                 .success(true)
                 .result(paginatedXrefs);
             
@@ -1267,7 +1341,7 @@ public class ProgramEndpoints extends AbstractEndpoint {
                     analysisInfo.put("available_analyzers", analyzers);
                     
                     // Build response
-                    ResponseBuilder builder = new ResponseBuilder(exchange, port)
+                    ResponseBuilder builder = new ResponseBuilder(exchange, getPort())
                         .success(true)
                         .result(analysisInfo);
                     
@@ -1311,13 +1385,13 @@ public class ProgramEndpoints extends AbstractEndpoint {
                 return;
             }
             
-            if (tool == null) {
+            if (getTool() == null) {
                 sendErrorResponse(exchange, 503, "Tool not available", "TOOL_NOT_AVAILABLE");
                 return;
             }
             
             // Get the current address
-            String currentAddress = GhidraUtil.getCurrentAddressString(tool);
+            String currentAddress = GhidraUtil.getCurrentAddressString(getTool());
             if (currentAddress == null) {
                 sendErrorResponse(exchange, 404, "Current address not available", "ADDRESS_NOT_AVAILABLE");
                 return;
@@ -1333,7 +1407,7 @@ public class ProgramEndpoints extends AbstractEndpoint {
                 result.put("program", program.getName());
             }
             
-            ResponseBuilder builder = new ResponseBuilder(exchange, port)
+            ResponseBuilder builder = new ResponseBuilder(exchange, getPort())
                 .success(true)
                 .result(result);
             
@@ -1380,20 +1454,20 @@ public class ProgramEndpoints extends AbstractEndpoint {
                 return;
             }
             
-            if (tool == null) {
+            if (getTool() == null) {
                 sendErrorResponse(exchange, 503, "Tool not available", "TOOL_NOT_AVAILABLE");
                 return;
             }
             
             // Get the current function info
-            Map<String, Object> functionInfo = GhidraUtil.getCurrentFunctionInfo(tool, program);
+            Map<String, Object> functionInfo = GhidraUtil.getCurrentFunctionInfo(getTool(), program);
             if (functionInfo.isEmpty()) {
                 sendErrorResponse(exchange, 404, "Current function not available", "FUNCTION_NOT_AVAILABLE");
                 return;
             }
             
             // Build response
-            ResponseBuilder builder = new ResponseBuilder(exchange, port)
+            ResponseBuilder builder = new ResponseBuilder(exchange, getPort())
                 .success(true)
                 .result(functionInfo);
             
@@ -1445,7 +1519,7 @@ public class ProgramEndpoints extends AbstractEndpoint {
                 result.put("analysis_triggered", true);
                 result.put("message", "Analysis initiated on program");
                 
-                ResponseBuilder builder = new ResponseBuilder(exchange, port)
+                ResponseBuilder builder = new ResponseBuilder(exchange, getPort())
                     .success(true)
                     .result(result);
                 
@@ -1535,7 +1609,7 @@ public class ProgramEndpoints extends AbstractEndpoint {
             Map<String, Object> graph = buildCallGraph(program, startFunction, maxDepth);
             
             // Build response
-            ResponseBuilder builder = new ResponseBuilder(exchange, port)
+            ResponseBuilder builder = new ResponseBuilder(exchange, getPort())
                 .success(true)
                 .result(graph);
             
@@ -1719,7 +1793,7 @@ public class ProgramEndpoints extends AbstractEndpoint {
             dataFlowResult.put("steps", steps);
             
             // Build response
-            ResponseBuilder builder = new ResponseBuilder(exchange, port)
+            ResponseBuilder builder = new ResponseBuilder(exchange, getPort())
                 .success(true)
                 .result(dataFlowResult);
             

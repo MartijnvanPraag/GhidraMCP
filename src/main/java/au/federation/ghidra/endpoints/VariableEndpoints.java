@@ -38,21 +38,8 @@ package au.federation.ghidra.endpoints;
 
     public class VariableEndpoints extends AbstractEndpoint {
 
-        private PluginTool tool;
-        
-        // Updated constructor to accept port
-        public VariableEndpoints(Program program, int port) {
-            super(program, port); // Call super constructor
-        }
-        
-        public VariableEndpoints(Program program, int port, PluginTool tool) {
-            super(program, port);
-            this.tool = tool;
-        }
-        
-        @Override
-        protected PluginTool getTool() {
-            return tool;
+        public VariableEndpoints(au.federation.ghidra.PluginState pluginState) {
+            super(pluginState);
         }
 
         @Override
@@ -77,7 +64,7 @@ package au.federation.ghidra.endpoints;
                     }
                     
                     // Create ResponseBuilder for HATEOAS-compliant response
-                    ResponseBuilder builder = new ResponseBuilder(exchange, port)
+                    ResponseBuilder builder = new ResponseBuilder(exchange, getPort())
                         .success(true)
                         .addLink("self", "/variables" + (exchange.getRequestURI().getRawQuery() != null ? 
                             "?" + exchange.getRequestURI().getRawQuery() : ""));

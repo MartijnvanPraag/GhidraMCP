@@ -14,20 +14,8 @@ import java.util.*;
 
 public class AnalysisEndpoints extends AbstractEndpoint {
 
-    private PluginTool tool;
-    
-    public AnalysisEndpoints(Program program, int port) {
-        super(program, port);
-    }
-    
-    public AnalysisEndpoints(Program program, int port, PluginTool tool) {
-        super(program, port);
-        this.tool = tool;
-    }
-    
-    @Override
-    protected PluginTool getTool() {
-        return tool;
+    public AnalysisEndpoints(au.federation.ghidra.PluginState pluginState) {
+        super(pluginState);
     }
 
     @Override
@@ -49,7 +37,7 @@ public class AnalysisEndpoints extends AbstractEndpoint {
             }
             
             // Create ResponseBuilder for HATEOAS-compliant response
-            ResponseBuilder builder = new ResponseBuilder(exchange, port)
+            ResponseBuilder builder = new ResponseBuilder(exchange, getPort())
                 .success(true)
                 .addLink("self", "/analysis");
             

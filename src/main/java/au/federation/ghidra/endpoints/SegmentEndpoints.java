@@ -14,21 +14,8 @@ package au.federation.ghidra.endpoints;
 
     public class SegmentEndpoints extends AbstractEndpoint {
 
-        private PluginTool tool;
-        
-        // Updated constructor to accept port
-        public SegmentEndpoints(Program program, int port) {
-            super(program, port); // Call super constructor
-        }
-        
-        public SegmentEndpoints(Program program, int port, PluginTool tool) {
-            super(program, port);
-            this.tool = tool;
-        }
-        
-        @Override
-        protected PluginTool getTool() {
-            return tool;
+        public SegmentEndpoints(au.federation.ghidra.PluginState pluginState) {
+            super(pluginState);
         }
 
         @Override
@@ -85,7 +72,7 @@ package au.federation.ghidra.endpoints;
                     }
                     
                     // Build response with HATEOAS links
-                    ResponseBuilder builder = new ResponseBuilder(exchange, port)
+                    ResponseBuilder builder = new ResponseBuilder(exchange, getPort())
                         .success(true);
                     
                     // Handle optional name filter

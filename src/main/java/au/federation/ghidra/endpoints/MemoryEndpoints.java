@@ -23,20 +23,9 @@ public class MemoryEndpoints extends AbstractEndpoint {
 
     private static final int DEFAULT_MEMORY_LENGTH = 16;
     private static final int MAX_MEMORY_LENGTH = 4096;
-    private PluginTool tool;
     
-    public MemoryEndpoints(Program program, int port) {
-        super(program, port);
-    }
-    
-    public MemoryEndpoints(Program program, int port, PluginTool tool) {
-        super(program, port);
-        this.tool = tool;
-    }
-    
-    @Override
-    protected PluginTool getTool() {
-        return tool;
+    public MemoryEndpoints(au.federation.ghidra.PluginState pluginState) {
+        super(pluginState);
     }
 
     @Override
@@ -70,7 +59,7 @@ public class MemoryEndpoints extends AbstractEndpoint {
                 String lengthStr = qparams.get("length");
                 
                 // Create ResponseBuilder for HATEOAS-compliant response
-                ResponseBuilder builder = new ResponseBuilder(exchange, port)
+                ResponseBuilder builder = new ResponseBuilder(exchange, getPort())
                     .success(true)
                     .addLink("self", "/memory" + (exchange.getRequestURI().getRawQuery() != null ? 
                         "?" + exchange.getRequestURI().getRawQuery() : ""));
@@ -269,7 +258,7 @@ private void handleMemoryComments(HttpExchange exchange, String addressStr, Stri
             result.put("comment_type", commentType);
             result.put("comment", comment != null ? comment : "");
             
-            ResponseBuilder builder = new ResponseBuilder(exchange, port)
+            ResponseBuilder builder = new ResponseBuilder(exchange, getPort())
                 .success(true)
                 .result(result)
                 .addLink("self", "/memory/" + addressStr + "/comments/" + commentType);
@@ -294,7 +283,7 @@ private void handleMemoryComments(HttpExchange exchange, String addressStr, Stri
                 result.put("comment_type", commentType);
                 result.put("comment", comment);
                 
-                ResponseBuilder builder = new ResponseBuilder(exchange, port)
+                ResponseBuilder builder = new ResponseBuilder(exchange, getPort())
                     .success(true)
                     .result(result)
                     .addLink("self", "/memory/" + addressStr + "/comments/" + commentType);
@@ -386,7 +375,7 @@ private void handleMemoryBlocksRequest(HttpExchange exchange) throws IOException
                 }
                 
                 // Create ResponseBuilder for HATEOAS-compliant response
-                ResponseBuilder builder = new ResponseBuilder(exchange, port)
+                ResponseBuilder builder = new ResponseBuilder(exchange, getPort())
                     .success(true)
                     .addLink("self", "/memory/blocks" + (exchange.getRequestURI().getRawQuery() != null ? 
                         "?" + exchange.getRequestURI().getRawQuery() : ""));

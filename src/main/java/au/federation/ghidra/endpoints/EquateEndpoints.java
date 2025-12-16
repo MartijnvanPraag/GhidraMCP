@@ -23,15 +23,9 @@ import java.util.*;
  */
 public class EquateEndpoints extends AbstractEndpoint {
 
-    private final PluginTool tool;
-
-    public EquateEndpoints(Program program, int port, PluginTool tool) {
-        super(program, port);
-        this.tool = tool;
+    public EquateEndpoints(au.federation.ghidra.PluginState pluginState) {
+        super(pluginState);
     }
-
-    @Override
-    protected PluginTool getTool() { return tool; }
 
     @Override
     public void registerEndpoints(HttpServer server) {
@@ -194,7 +188,7 @@ public class EquateEndpoints extends AbstractEndpoint {
                 }
             }
 
-            ResponseBuilder rb = new ResponseBuilder(exchange, port)
+            ResponseBuilder rb = new ResponseBuilder(exchange, getPort())
                 .success(true)
                 .result(result)
                 .addLink("self", "/equates/at/" + addr);
@@ -221,7 +215,7 @@ public class EquateEndpoints extends AbstractEndpoint {
             List<Equate> equates = eqTable.getEquates(value);
             List<Map<String,Object>> out = new ArrayList<>();
             if (equates != null) for (Equate eq : equates) out.add(equateMap(eq));
-            ResponseBuilder rb = new ResponseBuilder(exchange, port)
+            ResponseBuilder rb = new ResponseBuilder(exchange, getPort())
                 .success(true)
                 .result(out)
                 .addLink("self", "/equates/value/" + valueStr);
@@ -260,7 +254,7 @@ public class EquateEndpoints extends AbstractEndpoint {
         List<Map<String,Object>> slice = new ArrayList<>();
         for (int i = start; i < end; i++) slice.add(equateMap(filtered.get(i)));
 
-        ResponseBuilder rb = new ResponseBuilder(exchange, port)
+        ResponseBuilder rb = new ResponseBuilder(exchange, getPort())
             .success(true)
             .result(slice)
             .addLink("self", "/equates?offset=" + offset + "&limit=" + limit);
@@ -328,7 +322,7 @@ public class EquateEndpoints extends AbstractEndpoint {
             }
         }
 
-        ResponseBuilder rb = new ResponseBuilder(exchange, port)
+        ResponseBuilder rb = new ResponseBuilder(exchange, getPort())
             .success(true)
             .result(result)
             .addLink("self", "/equates/" + encodeComponent(name))
@@ -340,7 +334,7 @@ public class EquateEndpoints extends AbstractEndpoint {
     private void assignEquate(HttpExchange exchange, Program program, Map<String,String> body, boolean internal) throws IOException {
         try {
             Map<String,Object> assignmentInfo = performAssignment(program, body, false);
-            ResponseBuilder rb = new ResponseBuilder(exchange, port)
+            ResponseBuilder rb = new ResponseBuilder(exchange, getPort())
                 .success(true)
                 .result(assignmentInfo)
                 .addLink("self", "/equates/assign")
@@ -440,7 +434,7 @@ public class EquateEndpoints extends AbstractEndpoint {
             sendErrorResponse(exchange, 404, re.getMessage(), "ASSIGNMENT_NOT_FOUND");
             return;
         }
-        ResponseBuilder rb = new ResponseBuilder(exchange, port)
+        ResponseBuilder rb = new ResponseBuilder(exchange, getPort())
             .success(true)
             .result(Map.of(
                 "removed", true,
@@ -470,7 +464,7 @@ public class EquateEndpoints extends AbstractEndpoint {
         int start = Math.max(0, offset);
         int end = Math.min(usages.size(), offset + limit);
         List<Map<String,Object>> slice = usages.subList(start, end);
-        ResponseBuilder rb = new ResponseBuilder(exchange, port)
+        ResponseBuilder rb = new ResponseBuilder(exchange, getPort())
             .success(true)
             .result(slice)
             .addLink("self", "/equates/" + encodeComponent(equate.getName()) + "/usages?offset=" + offset + "&limit=" + limit);
@@ -500,7 +494,7 @@ public class EquateEndpoints extends AbstractEndpoint {
             sendErrorResponse(exchange, 500, "Internal transaction error", "INTERNAL_ERROR");
             return;
         }
-        ResponseBuilder rb = new ResponseBuilder(exchange, port)
+        ResponseBuilder rb = new ResponseBuilder(exchange, getPort())
             .success(true)
             .result(Map.of("deleted", true, "name", equate.getName()))
             .addLink("self", "/equates")
@@ -510,7 +504,7 @@ public class EquateEndpoints extends AbstractEndpoint {
 
     private ResponseBuilder buildEquateSummary(HttpExchange exchange, Equate eq) {
         Map<String,Object> map = equateMap(eq);
-        return new ResponseBuilder(exchange, port)
+        return new ResponseBuilder(exchange, getPort())
             .success(true)
             .result(map)
             .addLink("self", "/equates/" + encodeComponent(eq.getName()))

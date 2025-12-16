@@ -37,20 +37,8 @@ import java.nio.charset.StandardCharsets;
  */
 public class FunctionEndpoints extends AbstractEndpoint {
 
-    private PluginTool tool;
-
-    public FunctionEndpoints(Program program, int port) {
-        super(program, port);
-    }
-    
-    public FunctionEndpoints(Program program, int port, PluginTool tool) {
-        super(program, port);
-        this.tool = tool;
-    }
-    
-    @Override
-    protected PluginTool getTool() {
-        return tool;
+    public FunctionEndpoints(au.federation.ghidra.PluginState pluginState) {
+        super(pluginState);
     }
 
     @Override
@@ -121,7 +109,7 @@ public class FunctionEndpoints extends AbstractEndpoint {
                 // Get function details using RESTful response structure
                 FunctionInfo info = buildFunctionInfo(function);
                 
-                ResponseBuilder builder = new ResponseBuilder(exchange, port)
+                ResponseBuilder builder = new ResponseBuilder(exchange, getPort())
                     .success(true)
                     .result(info);
                 
@@ -184,7 +172,7 @@ public class FunctionEndpoints extends AbstractEndpoint {
                 // Get function details using RESTful response structure
                 FunctionInfo info = buildFunctionInfo(function);
                 
-                ResponseBuilder builder = new ResponseBuilder(exchange, port)
+                ResponseBuilder builder = new ResponseBuilder(exchange, getPort())
                     .success(true)
                     .result(info);
                 
@@ -280,7 +268,7 @@ public class FunctionEndpoints extends AbstractEndpoint {
                     : new ArrayList<>();
                 
                 // Build response with pagination links
-                ResponseBuilder builder = new ResponseBuilder(exchange, port)
+                ResponseBuilder builder = new ResponseBuilder(exchange, getPort())
                     .success(true)
                     .result(paginatedFunctions);
                 
@@ -454,7 +442,7 @@ public class FunctionEndpoints extends AbstractEndpoint {
         // Return updated function with RESTful response structure
         FunctionInfo info = buildFunctionInfo(function);
         
-        ResponseBuilder builder = new ResponseBuilder(exchange, port)
+        ResponseBuilder builder = new ResponseBuilder(exchange, getPort())
             .success(true)
             .result(info);
         
@@ -584,7 +572,7 @@ public class FunctionEndpoints extends AbstractEndpoint {
         // Return created function with RESTful response structure
         FunctionInfo info = buildFunctionInfo(function);
         
-        ResponseBuilder builder = new ResponseBuilder(exchange, port)
+        ResponseBuilder builder = new ResponseBuilder(exchange, getPort())
             .success(true)
             .result(info);
         
@@ -666,7 +654,7 @@ public class FunctionEndpoints extends AbstractEndpoint {
                     : new ArrayList<>();
                 
                 // Build response with pagination links
-                ResponseBuilder builder = new ResponseBuilder(exchange, port)
+                ResponseBuilder builder = new ResponseBuilder(exchange, getPort())
                     .success(true)
                     .result(paginatedFunctions);
                 
@@ -851,7 +839,7 @@ public class FunctionEndpoints extends AbstractEndpoint {
         FunctionInfo info = buildFunctionInfo(function);
         
         // Build response with HATEOAS links
-        ResponseBuilder builder = new ResponseBuilder(exchange, port)
+        ResponseBuilder builder = new ResponseBuilder(exchange, getPort())
             .success(true)
             .result(info);
         
@@ -948,7 +936,7 @@ public class FunctionEndpoints extends AbstractEndpoint {
         // Return updated function
         FunctionInfo info = buildFunctionInfo(function);
         
-        ResponseBuilder builder = new ResponseBuilder(exchange, port)
+        ResponseBuilder builder = new ResponseBuilder(exchange, getPort())
             .success(true)
             .result(info);
         
@@ -1056,9 +1044,34 @@ public class FunctionEndpoints extends AbstractEndpoint {
                     return program.getFunctionManager().createFunction(null, address, null, null);
                 });
             } catch (Exception e2) {
-                // Both attempts failed, return the error
-                sendErrorResponse(exchange, 400, "Failed to create function after multiple attempts: " + e.getMessage(), "CREATE_FAILED");
-                return;
+                // Third attempt: create with explicit body containing just the entry point
+                // This handles memory dumps where flow analysis fails
+                try {
+                    Msg.info(this, "Retry failed, attempting with explicit minimal body for memory dump compatibility");
+                    function = TransactionHelper.executeInTransaction(program, "Create Function With Body", () -> {
+                        // Get the instruction at the address to determine body size
+                        ghidra.program.model.listing.Instruction instr = program.getListing().getInstructionAt(address);
+                        ghidra.program.model.address.Address bodyEnd;
+                        if (instr != null) {
+                            // Use the instruction's end address
+                            bodyEnd = instr.getMaxAddress();
+                        } else {
+                            // Fallback: create minimal 1-byte body
+                            bodyEnd = address;
+                        }
+                        
+                        // Create an address set containing just the entry point region
+                        ghidra.program.model.address.AddressSet body = new ghidra.program.model.address.AddressSet(address, bodyEnd);
+                        
+                        // Create function with explicit body
+                        return program.getFunctionManager().createFunction(null, address, body, ghidra.program.model.symbol.SourceType.USER_DEFINED);
+                    });
+                } catch (Exception e3) {
+                    // All attempts failed, return the error
+                    sendErrorResponse(exchange, 400, "Failed to create function after multiple attempts: " + e.getMessage() + 
+                        " (memory dump compatibility also failed: " + e3.getMessage() + ")", "CREATE_FAILED");
+                    return;
+                }
             }
         }
         
@@ -1070,7 +1083,7 @@ public class FunctionEndpoints extends AbstractEndpoint {
         // Return created function
         FunctionInfo info = buildFunctionInfo(function);
         
-        ResponseBuilder builder = new ResponseBuilder(exchange, port)
+        ResponseBuilder builder = new ResponseBuilder(exchange, getPort())
             .success(true)
             .result(info);
         
@@ -1109,7 +1122,7 @@ public class FunctionEndpoints extends AbstractEndpoint {
                 result.put("syntax_tree", "Syntax tree not implemented");
             }
             
-            ResponseBuilder builder = new ResponseBuilder(exchange, port)
+            ResponseBuilder builder = new ResponseBuilder(exchange, getPort())
                 .success(true)
                 .result(result);
             
@@ -1201,7 +1214,7 @@ public class FunctionEndpoints extends AbstractEndpoint {
             result.put("function", functionInfo);
             result.put("instructions", disassembly);
             
-            ResponseBuilder builder = new ResponseBuilder(exchange, port)
+            ResponseBuilder builder = new ResponseBuilder(exchange, getPort())
                 .success(true)
                 .result(result);
             
@@ -1245,7 +1258,7 @@ public class FunctionEndpoints extends AbstractEndpoint {
             String functionPath = "/functions/" + function.getEntryPoint().toString();
             String functionByNamePath = "/functions/by-name/" + function.getName();
             
-            ResponseBuilder builder = new ResponseBuilder(exchange, port)
+            ResponseBuilder builder = new ResponseBuilder(exchange, getPort())
                 .success(true)
                 .result(result);
             
@@ -1332,7 +1345,7 @@ public class FunctionEndpoints extends AbstractEndpoint {
                 result.put("address", function.getEntryPoint().toString());
                 result.put("message", "Variable renamed successfully");
                 
-                ResponseBuilder builder = new ResponseBuilder(exchange, port)
+                ResponseBuilder builder = new ResponseBuilder(exchange, getPort())
                     .success(true)
                     .result(result);
                 

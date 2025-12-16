@@ -33,11 +33,11 @@ DEFAULT_GHIDRA_PORT = int(os.environ.get("GHIDRA_DEFAULT_PORT", "8192"))
 DEFAULT_GHIDRA_HOST = "localhost"
 # Discovery ranges start from a fixed baseline to avoid shifting with DEFAULT_GHIDRA_PORT env:
 # we still include DEFAULT_GHIDRA_PORT explicitly during discovery calls.
-QUICK_DISCOVERY_RANGE = range(8192, 8192+10)
-FULL_DISCOVERY_RANGE = range(8192, 8192+20)
+QUICK_DISCOVERY_RANGE = range(8192, 8192+3)
+FULL_DISCOVERY_RANGE = range(8192, 8192+10)
 
-BRIDGE_VERSION = "v2.0.0-beta.5"
-REQUIRED_API_VERSION = 2005
+BRIDGE_VERSION = "v2.0.0.1"
+REQUIRED_API_VERSION = 2510
 
 # Soft gate for API version mismatches. When set to "0"/"false" (case-insensitive),
 # the bridge will WARN and continue on API version mismatch instead of failing.
@@ -92,7 +92,10 @@ def _port_failed_create_set(port: int) -> set:
 
 def _block_is_executable(block: Dict[str, Any]) -> bool:
     try:
-        # Common shapes from HATEOAS plugins: execute/read/write booleans or permissions string
+        # Common shapes from HATEOAS plugins: executable/execute/read/write booleans or permissions string
+        # Check for "executable" first (HATEOAS standard), then "execute" (legacy)
+        if isinstance(block.get("executable"), bool):
+            return bool(block.get("executable"))
         if isinstance(block.get("execute"), bool):
             return bool(block.get("execute"))
         perms = str(block.get("permissions") or "").lower()
@@ -101,7 +104,7 @@ def _block_is_executable(block: Dict[str, Any]) -> bool:
             return ("x" in perms) or ("exec" in perms)
         name = str(block.get("name") or block.get("block") or block.get("section") or "").lower()
         # Heuristic: code sections
-        return any(seg in name for seg in (".text", "code", ".code"))
+        return any(seg in name for seg in (".text", "code", ".code", "ram"))
     except Exception:
         return False
 
@@ -156,7 +159,15 @@ def _addr_viable_for_function_create(port: int, addr_hex: str) -> Tuple[bool, Op
             return (False, "BAD_ADDRESS")
 
         # Must be inside a known memory block and executable
-        blocks = safe_get(port, "programs/current/memory/blocks")
+        # Try multiple endpoints for compatibility with GUI and headless
+        blocks = safe_get(port, "memory/blocks")
+        if not (isinstance(blocks, dict) and blocks.get("success") and isinstance(blocks.get("result"), list)):
+            # Fallback to sections endpoint
+            blocks = safe_get(port, "sections")
+        if not (isinstance(blocks, dict) and blocks.get("success") and isinstance(blocks.get("result"), list)):
+            # Final fallback to programs/current/memory/blocks
+            blocks = safe_get(port, "programs/current/memory/blocks")
+        
         ok_block = False
         if isinstance(blocks, dict) and blocks.get("success") and isinstance(blocks.get("result"), list):
             for b in blocks.get("result") or []:
@@ -176,7 +187,7 @@ def _addr_viable_for_function_create(port: int, addr_hex: str) -> Tuple[bool, Op
             return (False, "IN_HEADER_GUARD")
 
         # Prefer an actual CALL xref to this address
-        xr = xrefs_list(to_addr=f"{a:08X}", type="CALL", port=port)
+        xr = xrefs_list(to_addr=f"0x{a:08X}", type="CALL", port=port)
         has_call_xref = False
         try:
             if isinstance(xr, dict) and xr.get("success") and isinstance(xr.get("result"), list):
@@ -929,6 +940,23 @@ def periodic_discovery():
     """Periodically discover new instances"""
     while True:
         try:
+            # Check if discovery should be skipped due to locked/forced port
+            forced_port_env = os.environ.get("GHIDRA_FORCE_PORT")
+            if _LOCKED_PORT is not None or forced_port_env:
+                # Just verify the active port is still responsive
+                check_port = _LOCKED_PORT if _LOCKED_PORT is not None else int(forced_port_env)
+                try:
+                    url = f"http://{ghidra_host}:{check_port}/plugin-version"
+                    response = requests.get(url, timeout=1.0)
+                    if not response.ok:
+                        print(f"Warning: Port {check_port} not responding", file=sys.stderr)
+                except requests.exceptions.RequestException:
+                    print(f"Warning: Port {check_port} unreachable", file=sys.stderr)
+                # Don't scan other ports when locked/forced
+                time.sleep(60)  # Check less frequently when locked
+                continue
+            
+            # Only do full discovery when not locked/forced
             _discover_instances(FULL_DISCOVERY_RANGE, timeout=0.5)
 
             with instances_lock:
@@ -2381,6 +2409,1598 @@ def _parse_numeric_value(expr: str) -> Optional[int]:
     except Exception:
         return None
 
+
+def _extract_decompiled_text(resp: dict) -> str:
+    """Best-effort extraction of decompiled code text from a response object."""
+    if not isinstance(resp, dict):
+        return ""
+    result = resp.get("result")
+    if isinstance(result, dict):
+        for key in ("decompiled_text", "ccode", "code", "decompiled", "text", "pseudocode"):
+            value = result.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
+    if isinstance(resp.get("decompiled_text"), str):
+        return str(resp.get("decompiled_text"))
+    return ""
+
+
+def _extract_disassembly_text(resp: dict) -> str:
+    """Best-effort extraction of disassembly text from a response object."""
+    if not isinstance(resp, dict):
+        return ""
+    result = resp.get("result")
+    if isinstance(result, dict):
+        for key in ("disassembly", "text", "code", "body"):
+            value = result.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
+    if isinstance(resp.get("disassembly"), str):
+        return str(resp.get("disassembly"))
+    return ""
+
+
+def _normalize_address(value: Union[str, int, None]) -> Optional[str]:
+    """Normalize various address representations to uppercase hex without 0x prefix."""
+    if value is None:
+        return None
+    try:
+        if isinstance(value, int):
+            return f"{value:08X}"
+        text = str(value).strip()
+        if not text:
+            return None
+        if text.lower().startswith("0x"):
+            text = text[2:]
+        return f"{int(text, 16):08X}"
+    except Exception:
+        return None
+
+
+def _address_to_int(value: Union[str, int, None]) -> Optional[int]:
+    norm = _normalize_address(value)
+    if norm is None:
+        return None
+    try:
+        return int(norm, 16)
+    except Exception:
+        return None
+
+
+def _extract_xref_entries(resp: dict) -> List[dict]:
+    """Flatten different xref response shapes into a list."""
+    if not isinstance(resp, dict):
+        return []
+    result = resp.get("result")
+    if isinstance(result, list):
+        return [x for x in result if isinstance(x, dict)]
+    if isinstance(result, dict):
+        # Try both 'references' (current API) and 'xrefs' (legacy) keys
+        xrefs = result.get("references") or result.get("xrefs")
+        if isinstance(xrefs, list):
+            return [x for x in xrefs if isinstance(x, dict)]
+    return []
+
+
+def _is_call_xref(xref_entry: dict) -> bool:
+    """Check if an xref entry represents a call reference."""
+    if not isinstance(xref_entry, dict):
+        return False
+    # Check refType field (current API format)
+    ref_type = xref_entry.get("refType", "")
+    if "CALL" in ref_type:
+        return True
+    # Check type field (legacy format)
+    xref_type = xref_entry.get("type", "")
+    if xref_type == "CALL" or "CALL" in xref_type:
+        return True
+    return False
+
+
+def _count_call_xrefs(port: int, address_hex: str) -> int:
+    """Count call xrefs to a function address, handling varied response formats."""
+    try:
+        # Ensure address has 0x prefix for API compatibility
+        addr_with_prefix = f"0x{address_hex}" if not address_hex.startswith("0x") else address_hex
+        # Don't pass type parameter - API's type filtering doesn't work correctly
+        # Filter client-side instead based on refType field
+        resp = xrefs_list(to_addr=addr_with_prefix, port=port)
+        entries = _extract_xref_entries(resp)
+        # Filter for call xrefs only
+        call_entries = [e for e in entries if _is_call_xref(e)]
+        return len(call_entries)
+    except Exception:
+        return 0
+
+
+def _collect_functions_for_analysis(port: int, max_functions: int = 1800, page_size: int = 200) -> List[dict]:
+    """Collect a bounded list of functions for bulk analysis with pagination handling."""
+    functions: List[dict] = []
+    offset = 0
+    while len(functions) < max_functions:
+        params = {"offset": offset, "limit": page_size}
+        resp = safe_get(port, "functions", params)
+        simplified = simplify_response(resp)
+        if not isinstance(simplified, dict) or not simplified.get("success", True):
+            break
+        batch = simplified.get("result", [])
+        if not isinstance(batch, list) or not batch:
+            break
+        functions.extend([fn for fn in batch if isinstance(fn, dict)])
+        if len(batch) < page_size:
+            break
+        offset += page_size
+    return functions[:max_functions]
+
+
+def _extract_decryption_indicators(code: str) -> List[str]:
+    """Identify heuristic indicators that suggest a string decryption routine from decompiled code."""
+    if not code:
+        return []
+    indicators: List[str] = []
+    lower = code.lower()
+    if "^" in code or "xor" in lower:
+        indicators.append("xor_operation")
+    if "while" in lower or "for" in lower or " do {" in lower:
+        indicators.append("loop_structure")
+    if "char *" in lower or "char*" in lower or "byte *" in lower or "uint8_t *" in lower:
+        indicators.append("char_pointer")
+    if "memcpy" in lower or "memmove" in lower or "memset" in lower:
+        indicators.append("buffer_copy")
+    if "malloc" in lower or "operator new" in lower or "new" in lower:
+        indicators.append("heap_usage")
+    if "byte" in lower and "[" in code:
+        indicators.append("byte_array_access")
+    if "param_" in lower and "*param_" in lower:
+        indicators.append("parameter_pointer_usage")
+    return indicators
+
+
+def _extract_decryption_indicators_disasm(disasm: str) -> List[str]:
+    """Identify decryption heuristics from disassembly text."""
+    if not disasm:
+        return []
+    indicators: List[str] = []
+    lower = disasm.lower()
+    if " xor " in lower or lower.startswith("xor ") or "\nxor " in lower:
+        indicators.append("xor_instruction")
+    if " rol " in lower or " ror " in lower or "shl" in lower or "shr" in lower:
+        indicators.append("bitwise_rotation")
+    if "cmp" in lower and ("jnz" in lower or "jz" in lower or "jg" in lower or "jl" in lower or "ja" in lower or "jb" in lower):
+        indicators.append("loop_instruction")
+    if "byte ptr [" in lower or "word ptr [" in lower or "dword ptr [" in lower:
+        indicators.append("memory_pointer_access")
+    if "rep movs" in lower or "stosb" in lower or "lodsb" in lower:
+        indicators.append("byte_stream_copy")
+    if "0x100" in lower or "0xff" in lower or "0x101" in lower:
+        indicators.append("rc4_constant_hint")
+    return indicators
+
+
+def _function_signature_looks_like_string_decrypt(info_resp: dict) -> bool:
+    """Check whether a function signature resembles a string decryptor prototype."""
+    if not isinstance(info_resp, dict) or not info_resp.get("success", True):
+        return False
+    result = info_resp.get("result")
+    if not isinstance(result, dict):
+        return False
+    signature = str(result.get("signature") or "").lower()
+    if "char *" in signature or "char*" in signature:
+        return True
+    return_type = str(result.get("returnType") or result.get("return_type") or "").lower()
+    if "char *" in return_type or "char*" in return_type:
+        return True
+    params = result.get("parameters") or result.get("params")
+    if isinstance(params, list) and params:
+        param_types = " ".join(str(p.get("type") or p.get("dataType") or "") for p in params if isinstance(p, dict)).lower()
+        if param_types.count("char") >= 1 and ("*" in param_types or "ptr" in param_types):
+            return True
+    return False
+
+
+def _extract_printable_sequences(data: bytes, min_len: int, max_len: int) -> List[Tuple[str, int]]:
+    """Return printable ASCII sequences within bounds and their offsets."""
+    if not data or min_len <= 0 or max_len < min_len:
+        return []
+    pattern = re.compile(rb'[\x20-\x7E]{%d,%d}' % (min_len, max_len))
+    matches: List[Tuple[str, int]] = []
+    for match in pattern.finditer(data):
+        try:
+            decoded = match.group(0).decode('ascii')
+        except Exception:
+            continue
+        if decoded:
+            matches.append((decoded, match.start()))
+    return matches
+
+
+def _collect_ascii_strings(data: bytes, min_len: int = 6, max_items: int = 8) -> List[str]:
+    """Extract ASCII strings from data up to a maximum count."""
+    if not data or min_len <= 0 or max_items <= 0:
+        return []
+    strings: List[str] = []
+    current = bytearray()
+    for byte in data:
+        if 32 <= byte <= 126:
+            current.append(byte)
+            continue
+        if len(current) >= min_len:
+            try:
+                strings.append(current.decode('ascii', errors='ignore'))
+            except Exception:
+                pass
+            if len(strings) >= max_items:
+                return strings
+        current.clear()
+    if len(current) >= min_len and len(strings) < max_items:
+        try:
+            strings.append(current.decode('ascii', errors='ignore'))
+        except Exception:
+            pass
+    return strings
+
+
+def _rc4_decrypt_bytes(key_bytes: bytes, data: bytes) -> bytes:
+    """RC4-decrypt a byte sequence with the provided key bytes."""
+    if not key_bytes:
+        return b""
+    S = list(range(256))
+    j = 0
+    for i in range(256):
+        j = (j + S[i] + key_bytes[i % len(key_bytes)]) & 0xFF
+        S[i], S[j] = S[j], S[i]
+    i = 0
+    j = 0
+    out = bytearray()
+    for byte in data:
+        i = (i + 1) & 0xFF
+        j = (j + S[i]) & 0xFF
+        S[i], S[j] = S[j], S[i]
+        k = S[(S[i] + S[j]) & 0xFF]
+        out.append(byte ^ k)
+    return bytes(out)
+
+
+def _assess_rc4_decrypted_chunk(chunk: bytes) -> Optional[dict]:
+    """Evaluate decrypted data for readable content and return scoring details."""
+    if not chunk:
+        return None
+    printable = sum(1 for b in chunk if 32 <= b <= 126)
+    ratio = printable / len(chunk)
+    strings = _collect_ascii_strings(chunk, min_len=6, max_items=8)
+    keywords: List[str] = []
+    keyword_hints = ("http://", "https://", ".com", ".net", ".org", ".ru", ".top", ".biz", ".info", ".php", "telegram")
+    for text in strings:
+        lower_text = text.lower()
+        for hint in keyword_hints:
+            if hint in lower_text:
+                keywords.append(hint)
+    longest = max((len(text) for text in strings), default=0)
+    if ratio < 0.45 and not keywords and longest < 28:
+        return None
+    snippet = " | ".join(strings[:3])[:180]
+    confidence = 0.4
+    confidence += min(0.25, max(0.0, ratio - 0.55))
+    confidence += min(0.2, longest / 80)
+    if keywords:
+        confidence += min(0.2, 0.08 * len(set(keywords)))
+    if ratio >= 0.85:
+        confidence += 0.05
+    confidence = max(0.0, min(confidence, 0.95))
+    return {
+        "ratio": round(ratio, 3),
+        "strings": strings[:6],
+        "keywords": sorted(set(keywords)),
+        "longest": longest,
+        "snippet": snippet,
+        "confidence": round(confidence, 2),
+    }
+
+
+def _scan_rc4_windows(
+    data: bytes,
+    key_text: str,
+    start_addr: Optional[int],
+    section_name: str,
+    window_size: int = 256,
+    stride: int = 32,
+    max_results: int = 6,
+) -> List[dict]:
+    """Scan a byte buffer with RC4 windows and return high-confidence plaintext hits."""
+    if not data or not key_text:
+        return []
+    key_bytes = key_text.encode("utf-8", errors="ignore")
+    if len(key_bytes) < 5:
+        return []
+    matches: List[dict] = []
+    limit = len(data) - window_size
+    if limit < 0:
+        limit = 0
+    for offset in range(0, limit + 1, stride):
+        chunk = data[offset : offset + window_size]
+        if not chunk or len(chunk) < window_size:
+            continue
+        decrypted = _rc4_decrypt_bytes(key_bytes, chunk)
+        assessment = _assess_rc4_decrypted_chunk(decrypted)
+        if not assessment:
+            continue
+        addr_str = f"0x{start_addr + offset:08X}" if start_addr is not None else None
+        matches.append(
+            {
+                "key": key_text,
+                "address": addr_str,
+                "offset": offset,
+                "section": section_name,
+                "window_size": len(chunk),
+                "confidence": assessment["confidence"],
+                "printable_ratio": assessment["ratio"],
+                "longest_printable": assessment["longest"],
+                "keywords": assessment["keywords"],
+                "preview_strings": assessment["strings"],
+                "preview_snippet": assessment["snippet"],
+            }
+        )
+    matches.sort(key=lambda item: item.get("confidence", 0), reverse=True)
+    return matches[:max_results]
+
+
+def _is_valid_rc4_key(text: str) -> bool:
+    if not text:
+        return False
+    if len(text) < 8 or len(text) > 64:
+        return False
+    printable = sum(1 for ch in text if 32 <= ord(ch) <= 126)
+    if printable / len(text) < 0.9:
+        return False
+    return any(ch.isalpha() for ch in text)
+
+
+def _is_potential_seed(value: int) -> bool:
+    return isinstance(value, int) and 0x1000 <= value <= 0xFFFFFFFF
+
+
+def _maybe_simple_xor_decode(data: bytes) -> Optional[Tuple[str, str]]:
+    """Attempt plain or single-byte XOR decoding for short ciphertext."""
+    if not data:
+        return None
+    trimmed = data.split(b"\x00", 1)[0]
+    if not trimmed:
+        trimmed = data[:16]
+    trimmed = trimmed[:32]
+    if not trimmed:
+        return None
+    if all(32 <= b <= 126 for b in trimmed):
+        try:
+            text = trimmed.decode('ascii')
+            return text, "plain"
+        except Exception:
+            pass
+    for key in range(1, 256):
+        decoded = bytes(b ^ key for b in trimmed)
+        if all(32 <= c <= 126 for c in decoded):
+            try:
+                text = decoded.decode('ascii')
+                return text, f"xor_0x{key:02X}"
+            except Exception:
+                continue
+    return None
+
+
+def _extract_string_value_from_item(item: dict) -> Optional[str]:
+    if not isinstance(item, dict):
+        return None
+    for key in ("value", "string", "stringValue", "text", "data", "contents"):
+        value = item.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _extract_string_address_from_item(item: dict) -> Optional[str]:
+    if not isinstance(item, dict):
+        return None
+    for key in ("address", "addr", "start", "valueAddress", "value_address"):
+        addr = _normalize_address(item.get(key))
+        if addr is not None:
+            return f"0x{addr}"
+    return None
+
+
+def _gather_decrypt_call_arguments(port: int, callee_name: str, callee_addr: str, max_sites: int = 25) -> List[dict]:
+    """Collect pointer arguments passed to a suspected decryptor across call sites."""
+    pointers: List[dict] = []
+    seen_callers: set[str] = set()
+    # Ensure address has 0x prefix for API compatibility
+    addr_with_prefix = f"0x{callee_addr}" if not callee_addr.startswith("0x") else callee_addr
+    xref_entries = _extract_xref_entries(xrefs_list(to_addr=addr_with_prefix, type="CALL", port=port))
+    for entry in xref_entries:
+        if len(pointers) >= max_sites:
+            break
+        call_addr = _normalize_address(entry.get("from_address") or entry.get("fromAddress") or entry.get("from"))
+        parent_addr = _normalize_address(entry.get("function_address") or entry.get("functionAddress"))
+        parent_name = entry.get("functionName") or entry.get("fromFunction") or entry.get("parentFunction")
+        if not parent_name:
+            if parent_addr:
+                parent_info = functions_get(address=f"0x{parent_addr}", port=port)
+                if isinstance(parent_info, dict) and parent_info.get("success"):
+                    result = parent_info.get("result")
+                    if isinstance(result, dict):
+                        parent_name = result.get("name")
+                        if not parent_addr:
+                            parent_addr = _normalize_address(result.get("address") or result.get("entry"))
+        if not parent_name:
+            parent_name = parent_addr and f"FUN_{parent_addr}" or None
+        if not parent_name or parent_name in seen_callers:
+            continue
+        seen_callers.add(parent_name)
+        call_args = functions_list_call_args(name=parent_name, callee=callee_name, port=port)
+        if not (isinstance(call_args, dict) and call_args.get("success")):
+            continue
+        for call in call_args.get("calls", []):
+            args = call.get("args", [])
+            for arg in args:
+                pointer_hex = arg.get("value_hex")
+                norm_ptr = _normalize_address(pointer_hex)
+                if norm_ptr is None:
+                    continue
+                pointers.append({
+                    "caller": parent_name,
+                    "caller_address": f"0x{parent_addr}" if parent_addr else None,
+                    "callsite": f"0x{call_addr}" if call_addr else None,
+                    "arg_index": arg.get("idx"),
+                    "pointer": f"0x{norm_ptr}"
+                })
+                if len(pointers) >= max_sites:
+                    break
+            if len(pointers) >= max_sites:
+                break
+    return pointers
+
+
+def _resolve_function_identity(
+    port: int,
+    name: Optional[str] = None,
+    address: Optional[str] = None,
+) -> Optional[Tuple[str, str]]:
+    """Resolve function identity returning (normalized_address, canonical_name)."""
+    addr_norm: Optional[str] = None
+    resolved_name: Optional[str] = None
+
+    if address:
+        addr_norm = _normalize_address(address)
+        if addr_norm is None:
+            return None
+        try:
+            info = functions_get(address=f"0x{addr_norm}", port=port)
+        except Exception:
+            info = None
+        if isinstance(info, dict) and info.get("success"):
+            result = info.get("result")
+            if isinstance(result, dict):
+                resolved_name = result.get("name") or result.get("displayName")
+
+    if addr_norm is None and name:
+        try:
+            info_by_name = functions_get(name=name, port=port)
+        except Exception:
+            info_by_name = None
+        if isinstance(info_by_name, dict) and info_by_name.get("success"):
+            result = info_by_name.get("result")
+            if isinstance(result, dict):
+                addr_norm = _normalize_address(result.get("address") or result.get("entry"))
+                resolved_name = result.get("name") or resolved_name or name
+
+    if addr_norm is None and name:
+        hint = _resolve_function_hint(name, port)
+        if hint:
+            addr_norm, hint_name = hint
+            if not resolved_name:
+                resolved_name = hint_name or name
+
+    if addr_norm is None:
+        return None
+
+    if not resolved_name:
+        resolved_name = name or f"FUN_{addr_norm}"
+
+    return addr_norm, resolved_name
+
+
+def _analyze_decrypt_pointer(port: int, pointer: str, max_bytes: int = 96) -> dict:
+    """Read pointer memory and derive heuristic plaintext indicators."""
+    try:
+        length = int(max(8, min(1024, max_bytes)))
+    except Exception:
+        length = 96
+
+    resp = memory_read_range(address=pointer, length=length, format="base64", port=port)
+    if not isinstance(resp, dict) or not resp.get("success"):
+        return {
+            "success": False,
+            "error": resp.get("error") if isinstance(resp, dict) else {
+                "code": "MEMORY_READ_FAILED",
+                "message": "Unexpected response"
+            }
+        }
+
+    raw_b64 = resp.get("rawBytes")
+    data = b""
+    if isinstance(raw_b64, str):
+        try:
+            data = base64.b64decode(raw_b64)
+        except Exception:
+            data = b""
+
+    if not data:
+        result = {
+            "success": True,
+            "length": 0,
+            "raw_base64": raw_b64,
+            "printable_ratio": 0.0,
+            "ascii_preview": "",
+            "hex_preview": "",
+            "strings": [],
+        }
+        if resp.get("warnings"):
+            result["warnings"] = resp.get("warnings")
+        return result
+
+    printable = sum(1 for b in data if 32 <= b <= 126)
+    ratio = printable / len(data)
+    ascii_preview = "".join(chr(b) if 32 <= b <= 126 else "." for b in data[:64])
+    hex_preview = data[:24].hex().upper()
+    strings = _collect_ascii_strings(data, min_len=5, max_items=6)
+    guess = _maybe_simple_xor_decode(data)
+
+    analysis = {
+        "success": True,
+        "length": len(data),
+        "raw_base64": raw_b64,
+        "printable_ratio": round(ratio, 3),
+        "ascii_preview": ascii_preview,
+        "hex_preview": hex_preview,
+        "strings": strings,
+    }
+
+    if guess:
+        plaintext, method = guess
+        analysis["plaintext_guess"] = plaintext
+        analysis["guess_method"] = method
+
+    warnings = resp.get("warnings")
+    if isinstance(warnings, list) and warnings:
+        analysis["warnings"] = warnings
+
+    return analysis
+
+
+def _compute_string_decryptor_candidates(port: int, min_xrefs: int, check_signature: bool) -> List[dict]:
+    """Shared logic for identifying string decryptor function candidates."""
+    scan_functions = _collect_functions_for_analysis(port)
+    candidates: List[dict] = []
+    for fn in scan_functions:
+        addr_norm = _normalize_address(fn.get("address") or fn.get("entry") or fn.get("addr"))
+        if addr_norm is None:
+            continue
+        xref_count = _count_call_xrefs(port, addr_norm)
+        if xref_count < max(1, min_xrefs):
+            continue
+        indicators_set: set[str] = set()
+        indicator_sources: Dict[str, List[str]] = {}
+        decompile_preview: List[str] = []
+        disasm_preview: List[str] = []
+
+        decomp_resp = functions_decompile(address=f"0x{addr_norm}", port=port)
+        code = _extract_decompiled_text(decomp_resp)
+        if code:
+            decompile_preview = [line.rstrip() for line in code.strip().splitlines()[:6]]
+            decomp_indicators = _extract_decryption_indicators(code)
+            if decomp_indicators:
+                indicators_set.update(decomp_indicators)
+                indicator_sources["decompile"] = decomp_indicators
+
+        disasm_text = ""
+        if not indicators_set or "xor_operation" not in indicators_set or "loop_structure" not in indicators_set:
+            try:
+                disasm_resp = functions_disassemble(address=f"0x{addr_norm}", port=port)
+                disasm_text = _extract_disassembly_text(disasm_resp)
+                if disasm_text:
+                    disasm_preview = [line.rstrip() for line in disasm_text.strip().splitlines()[:10]]
+                    disasm_indicators = _extract_decryption_indicators_disasm(disasm_text)
+                    if disasm_indicators:
+                        indicators_set.update(disasm_indicators)
+                        indicator_sources["disassembly"] = disasm_indicators
+            except Exception:
+                disasm_text = ""
+
+        signature_ok = None
+        if check_signature or not indicators_set:
+            try:
+                info = functions_get(address=f"0x{addr_norm}", port=port)
+            except Exception:
+                info = None
+            signature_ok = _function_signature_looks_like_string_decrypt(info)
+            if signature_ok:
+                indicators_set.add("signature_char_pointer")
+                indicator_sources.setdefault("signature", []).append("signature_char_pointer")
+
+        if not indicators_set:
+            continue
+
+        confidence = 0.2
+        confidence += min(0.25, 0.05 * max(0, xref_count - min_xrefs))
+        if any(ind in indicators_set for ind in ("xor_operation", "xor_instruction")):
+            confidence += 0.3
+        if any(ind in indicators_set for ind in ("loop_structure", "loop_instruction")):
+            confidence += 0.22
+        if any(ind in indicators_set for ind in ("char_pointer", "signature_char_pointer", "parameter_pointer_usage")):
+            confidence += 0.18
+        if any(ind in indicators_set for ind in ("buffer_copy", "byte_stream_copy", "memory_pointer_access")):
+            confidence += 0.12
+        if "rc4_constant_hint" in indicators_set:
+            confidence += 0.08
+        if len(indicators_set) >= 4:
+            confidence += 0.05
+        if check_signature:
+            if signature_ok:
+                confidence += 0.08
+            elif signature_ok is False:
+                confidence -= 0.05
+
+        confidence = max(0.0, min(confidence, 1.0))
+
+        name = fn.get("name") or f"FUN_{addr_norm}"
+        candidate = {
+            "name": name,
+            "address": f"0x{addr_norm}",
+            "xref_count": xref_count,
+            "confidence": round(confidence, 2),
+            "indicators": sorted(indicators_set),
+        }
+        if indicator_sources:
+            candidate["indicator_sources"] = indicator_sources
+        if decompile_preview:
+            candidate["decompile_preview"] = decompile_preview
+        if disasm_preview:
+            candidate["disassembly_preview"] = disasm_preview
+        if signature_ok is not None:
+            candidate["signature_likely_string_pointer"] = bool(signature_ok)
+        candidates.append(candidate)
+    candidates.sort(key=lambda item: item.get("confidence", 0), reverse=True)
+    return candidates
+
+
+@mcp.tool()
+def functions_identify_string_decryptors(
+    min_xrefs: int = 3,
+    check_signature: bool = True,
+    port: Optional[int] = None
+) -> dict:
+    """Identify candidate string decryption routines based on static heuristics."""
+    try:
+        resolved_port = _get_instance_port(port)
+        candidates = _compute_string_decryptor_candidates(resolved_port, min_xrefs, check_signature)
+        if not candidates and min_xrefs > 1:
+            relaxed_min_xrefs = min_xrefs
+            while not candidates and relaxed_min_xrefs > 1:
+                relaxed_min_xrefs = max(1, relaxed_min_xrefs - 1)
+                fallback = _compute_string_decryptor_candidates(
+                    resolved_port,
+                    relaxed_min_xrefs,
+                    True,
+                )
+                if fallback:
+                    for entry in fallback:
+                        notes = entry.setdefault("analysis_notes", [])
+                        if "relaxed_min_xrefs" not in notes:
+                            notes.append("relaxed_min_xrefs")
+                        entry.setdefault("fallback_min_xrefs", relaxed_min_xrefs)
+                    candidates = fallback
+        return {
+            "success": True,
+            "candidates": candidates,
+            "count": len(candidates),
+            "timestamp": int(time.time() * 1000),
+        }
+    except Exception as exc:
+        return {
+            "success": False,
+            "error": {
+                "code": "STRING_DECRYPTOR_ANALYSIS_ERROR",
+                "message": str(exc),
+            },
+            "timestamp": int(time.time() * 1000),
+        }
+
+
+@mcp.tool()
+def strings_decrypt_at_xrefs(
+    decryptor_address: str,
+    key_pointer_address: Optional[str] = None,
+    max_xrefs: int = 50,
+    max_string_length: int = 256,
+    port: Optional[int] = None
+) -> dict:
+    """
+    Automatically decrypt strings at all call sites of a decryptor function.
+    
+    This tool implements the complete autonomous decryption workflow:
+    1. Gets all XREFs (call sites) to the decryptor function
+    2. Decompiles each caller to extract encrypted buffer addresses
+    3. Reads encrypted data from memory
+    4. Optionally dereferences key pointer to get actual key buffer
+    5. Reads key buffer from memory
+    6. Decrypts each string using XOR with repeating key
+    7. Returns all decrypted strings with metadata
+    
+    Args:
+        decryptor_address: Address of the decryptor function (e.g., "0x030a3400")
+        key_pointer_address: Optional address of pointer to key buffer (e.g., "0x030be000")
+                            If provided, will dereference to get actual key address
+        max_xrefs: Maximum number of call sites to process (default: 50)
+        max_string_length: Maximum bytes to read per encrypted string (default: 256)
+        port: Ghidra API port (defaults to environment or 8192)
+    
+    Returns:
+        Dictionary containing:
+        - success: Boolean indicating overall success
+        - decryptor_address: Address of decryptor function
+        - key_address: Actual key buffer address (after dereferencing if applicable)
+        - xref_count: Total number of call sites found
+        - processed_count: Number of call sites processed
+        - decrypted_strings: List of decryption results, each containing:
+            - caller_function: Name of function calling decryptor
+            - caller_address: Address of call instruction
+            - encrypted_address: Address of encrypted buffer
+            - encrypted_hex: Hex representation of encrypted data
+            - decrypted_text: Decrypted plaintext (if successful)
+            - decrypted_hex: Hex of decrypted bytes
+            - success: Boolean for this specific decryption
+            - error: Error message if decryption failed
+        - timestamp: Unix timestamp in milliseconds
+    
+    Example:
+        result = strings_decrypt_at_xrefs(
+            decryptor_address="0x030a3400",
+            key_pointer_address="0x030be000",
+            max_xrefs=20
+        )
+    """
+    import struct
+    import re
+    
+    port = port or int(os.environ.get("GHIDRA_PORT", 8192))
+    
+    try:
+        # Step 1: Get all XREFs to decryptor
+        xrefs_result = xrefs_list(to_addr=decryptor_address, port=port)
+        xrefs = xrefs_result.get("result", {}).get("references", [])
+        
+        if not xrefs:
+            return {
+                "success": False,
+                "error": "No XREFs found to decryptor function",
+                "decryptor_address": decryptor_address,
+                "timestamp": int(time.time() * 1000),
+            }
+        
+        # Limit number of xrefs to process
+        xrefs = xrefs[:max_xrefs]
+        
+        # Step 2: Get key buffer address (dereference pointer if provided)
+        key_address = None
+        key_bytes = None
+        
+        if key_pointer_address:
+            # Dereference pointer to get actual key address
+            ptr_result = memory_read(address=key_pointer_address, length=4, port=port)
+            ptr_hex = ptr_result.get("hexBytes", "").replace(" ", "")
+            if ptr_hex:
+                ptr_bytes = bytes.fromhex(ptr_hex)
+                key_address_int = struct.unpack("<I", ptr_bytes)[0]
+                key_address = f"0x{key_address_int:08x}"
+            else:
+                return {
+                    "success": False,
+                    "error": "Failed to dereference key pointer",
+                    "decryptor_address": decryptor_address,
+                    "key_pointer_address": key_pointer_address,
+                    "timestamp": int(time.time() * 1000),
+                }
+        
+        # Read key buffer if we have an address
+        if key_address:
+            key_result = memory_read(address=key_address, length=256, port=port)
+            key_hex = key_result.get("hexBytes", "").replace(" ", "")
+            if key_hex:
+                key_bytes = bytes.fromhex(key_hex)
+        
+        # Step 3: Process each XREF to decrypt strings
+        decrypted_strings = []
+        
+        # Group xrefs by caller function to minimize decompilation calls
+        callers_map = {}
+        for xref in xrefs:
+            from_func = xref.get("from_function", {})
+            func_addr = from_func.get("address")
+            func_name = from_func.get("name", "unknown")
+            call_addr = xref.get("from_addr")
+            
+            if func_addr not in callers_map:
+                callers_map[func_addr] = {
+                    "name": func_name,
+                    "address": func_addr,
+                    "calls": []
+                }
+            callers_map[func_addr]["calls"].append(call_addr)
+        
+        # Process each caller function
+        for func_addr, func_info in callers_map.items():
+            try:
+                # Decompile caller to find encrypted buffer addresses
+                decompile_result = functions_decompile(address=func_addr, port=port)
+                code = decompile_result.get("result", {}).get("decompiled", "")
+                
+                # Find all lines calling the decryptor (case-insensitive)
+                decryptor_short = decryptor_address.replace("0x", "").replace("0X", "")
+                pattern_str = rf"FUN_{decryptor_short}\s*\(&DAT_([0-9a-fA-F]+)"
+                pattern = re.compile(pattern_str, re.IGNORECASE)
+                
+                for match in pattern.finditer(code):
+                    encrypted_addr_hex = match.group(1)
+                    encrypted_address = f"0x{encrypted_addr_hex}"
+                    
+                    # Find which call site this corresponds to
+                    caller_address = func_info["calls"][0] if func_info["calls"] else "unknown"
+                    if len(func_info["calls"]) > 0:
+                        func_info["calls"].pop(0)  # Remove processed call
+                    
+                    try:
+                        # Read encrypted data
+                        enc_result = memory_read(
+                            address=encrypted_address,
+                            length=max_string_length,
+                            port=port
+                        )
+                        enc_hex = enc_result.get("hexBytes", "").replace(" ", "")
+                        enc_bytes = bytes.fromhex(enc_hex) if enc_hex else b""
+                        
+                        # Decrypt if we have a key
+                        if key_bytes and enc_bytes:
+                            # Simple XOR with repeating key
+                            decrypted = bytearray()
+                            for i in range(len(enc_bytes)):
+                                if enc_bytes[i] == 0:
+                                    break
+                                key_byte = key_bytes[i % len(key_bytes)]
+                                dec_byte = enc_bytes[i] ^ key_byte
+                                decrypted.append(dec_byte)
+                                if dec_byte == 0:
+                                    break
+                            
+                            # Try to decode as ASCII
+                            try:
+                                decrypted_text = bytes(decrypted).rstrip(b"\x00").decode("ascii")
+                                success = True
+                                error = None
+                            except Exception as e:
+                                decrypted_text = None
+                                success = False
+                                error = f"Decode failed: {str(e)}"
+                            
+                            decrypted_strings.append({
+                                "caller_function": func_info["name"],
+                                "caller_address": caller_address,
+                                "encrypted_address": encrypted_address,
+                                "encrypted_hex": enc_hex[:64] + ("..." if len(enc_hex) > 64 else ""),
+                                "decrypted_text": decrypted_text,
+                                "decrypted_hex": bytes(decrypted).hex(),
+                                "success": success,
+                                "error": error
+                            })
+                        else:
+                            decrypted_strings.append({
+                                "caller_function": func_info["name"],
+                                "caller_address": caller_address,
+                                "encrypted_address": encrypted_address,
+                                "encrypted_hex": enc_hex[:64] + ("..." if len(enc_hex) > 64 else ""),
+                                "decrypted_text": None,
+                                "decrypted_hex": None,
+                                "success": False,
+                                "error": "No key buffer available"
+                            })
+                    
+                    except Exception as e:
+                        decrypted_strings.append({
+                            "caller_function": func_info["name"],
+                            "caller_address": caller_address,
+                            "encrypted_address": encrypted_address,
+                            "encrypted_hex": None,
+                            "decrypted_text": None,
+                            "decrypted_hex": None,
+                            "success": False,
+                            "error": str(e)
+                        })
+            
+            except Exception as e:
+                # Failed to process this caller function
+                for call_addr in func_info["calls"]:
+                    decrypted_strings.append({
+                        "caller_function": func_info["name"],
+                        "caller_address": call_addr,
+                        "encrypted_address": None,
+                        "encrypted_hex": None,
+                        "decrypted_text": None,
+                        "decrypted_hex": None,
+                        "success": False,
+                        "error": f"Decompile failed: {str(e)}"
+                    })
+        
+        return {
+            "success": True,
+            "decryptor_address": decryptor_address,
+            "key_pointer_address": key_pointer_address,
+            "key_address": key_address,
+            "xref_count": len(xrefs),
+            "processed_count": len(decrypted_strings),
+            "decrypted_strings": decrypted_strings,
+            "timestamp": int(time.time() * 1000),
+        }
+    
+    except Exception as exc:
+        return {
+            "success": False,
+            "error": str(exc),
+            "decryptor_address": decryptor_address,
+            "timestamp": int(time.time() * 1000),
+        }
+
+
+@mcp.tool()
+def functions_extract_rc4_seeds(
+    function_address: Optional[str] = None,
+    search_config: bool = True,
+    section_candidates: Optional[List[str]] = None,
+    port: Optional[int] = None
+) -> dict:
+    """Extract RC4 key candidates, configuration strings, and potential DGA seeds."""
+    try:
+        resolved_port = _get_instance_port(port)
+        sections = section_candidates or [".rdata", ".data", ".data.rel.ro", ".rodata"]
+        rc4_keys: List[dict] = []
+        key_seen: set[str] = set()
+        config_strings: List[dict] = []
+        scanned_sections: List[str] = []
+        section_blobs: List[dict] = []
+
+        for section_name in sections:
+            try:
+                section_resp = section_read_by_name(section_name=section_name, format="base64", port=resolved_port)
+            except Exception:
+                continue
+            if not (isinstance(section_resp, dict) and section_resp.get("success")):
+                continue
+            section_result = section_resp.get("result", {})
+            data_b64 = section_result.get("data")
+            section_info = section_result.get("section_info", {})
+            if not isinstance(data_b64, str) or not data_b64:
+                continue
+            try:
+                section_bytes = base64.b64decode(data_b64)
+            except Exception:
+                continue
+            start_addr = _address_to_int(section_info.get("start"))
+            sequences = _extract_printable_sequences(section_bytes, 6, 48)
+            scanned_sections.append(section_info.get("name") or section_name)
+            section_blobs.append({
+                "name": section_info.get("name") or section_name,
+                "start": start_addr,
+                "data": section_bytes,
+            })
+
+            for text, offset in sequences:
+                if not _is_valid_rc4_key(text) or text in key_seen:
+                    continue
+                key_seen.add(text)
+                key_address = f"0x{start_addr + offset:08X}" if start_addr is not None else None
+                score = 0.5
+                if any(ch.isdigit() for ch in text) and any(ch.isalpha() for ch in text):
+                    score += 0.2
+                if text.islower() or text.isupper():
+                    score += 0.1
+                rc4_keys.append({
+                    "key": text,
+                    "length": len(text),
+                    "address": key_address,
+                    "section": section_info.get("name") or section_name,
+                    "confidence": round(min(score, 0.95), 2),
+                })
+
+            if search_config:
+                for text, offset in sequences:
+                    lower_text = text.lower()
+                    if any(hint in lower_text for hint in ("http://", "https://", ".php", ".asp", ".com", ".net")):
+                        entry = {
+                            "value": text,
+                            "section": section_info.get("name") or section_name,
+                        }
+                        if start_addr is not None:
+                            entry["address"] = f"0x{start_addr + offset:08X}"
+                        config_strings.append(entry)
+
+        seed_map: Dict[int, dict] = {}
+        analysis_notes: List[str] = []
+        rc4_decoded_blocks: List[dict] = []
+        if function_address:
+            addr_norm = _normalize_address(function_address)
+            if addr_norm:
+                immediates = functions_list_immediates(address=f"0x{addr_norm}", port=resolved_port)
+                if isinstance(immediates, dict) and immediates.get("success"):
+                    for item in immediates.get("items", []):
+                        value_hex = item.get("value_hex")
+                        if not isinstance(value_hex, str):
+                            continue
+                        try:
+                            value = int(value_hex, 16)
+                        except Exception:
+                            continue
+                        if not _is_potential_seed(value):
+                            continue
+                        entry = seed_map.setdefault(value, {
+                            "value": value,
+                            "value_hex": value_hex.upper(),
+                            "occurrences": 0,
+                            "notes": [],
+                        })
+                        entry["occurrences"] = entry.get("occurrences", 0) + int(item.get("count", 1))
+                        if value in (0x81716ECC, 0x7E8E9133) and "observed_zloader_constant" not in entry["notes"]:
+                            entry["notes"].append("observed_zloader_constant")
+
+                decomp_resp = functions_decompile(address=f"0x{addr_norm}", port=resolved_port)
+                code_lower = _extract_decompiled_text(decomp_resp).lower()
+                if code_lower:
+                    if any(keyword in code_lower for keyword in ("time", "date", "timestamp")):
+                        if "decompiler_mentions_time_seed" not in analysis_notes:
+                            analysis_notes.append("decompiler_mentions_time_seed")
+                    if "rc4" in code_lower:
+                        if "decompiler_mentions_rc4" not in analysis_notes:
+                            analysis_notes.append("decompiler_mentions_rc4")
+
+        if rc4_keys and section_blobs:
+            for key_entry in rc4_keys:
+                key_text = key_entry.get("key")
+                if not isinstance(key_text, str):
+                    continue
+                for blob in section_blobs:
+                    matches = _scan_rc4_windows(
+                        blob.get("data", b""),
+                        key_text,
+                        blob.get("start"),
+                        blob.get("name", "unknown"),
+                        window_size=256,
+                        stride=32,
+                        max_results=4,
+                    )
+                    for match in matches:
+                        match.setdefault("key_address", key_entry.get("address"))
+                        rc4_decoded_blocks.append(match)
+            rc4_decoded_blocks.sort(key=lambda item: item.get("confidence", 0), reverse=True)
+            if rc4_decoded_blocks and "rc4_decoded_candidates" not in analysis_notes:
+                analysis_notes.append("rc4_decoded_candidates")
+            rc4_decoded_blocks = rc4_decoded_blocks[:40]
+
+        sanitized_seeds: List[dict] = []
+        for value, entry in seed_map.items():
+            if not entry.get("notes"):
+                entry.pop("notes")
+            sanitized_seeds.append(entry)
+        sanitized_seeds.sort(key=lambda item: item.get("occurrences", 0), reverse=True)
+
+        return {
+            "success": True,
+            "rc4_keys": rc4_keys,
+            "dga_seeds": sanitized_seeds,
+            "config_strings": config_strings if search_config else [],
+            "rc4_decoded_candidates": rc4_decoded_blocks,
+            "analysis_notes": analysis_notes,
+            "scanned_sections": scanned_sections,
+            "timestamp": int(time.time() * 1000),
+        }
+    except Exception as exc:
+        return {
+            "success": False,
+            "error": {
+                "code": "RC4_SEED_EXTRACTION_ERROR",
+                "message": str(exc),
+            },
+            "timestamp": int(time.time() * 1000),
+        }
+
+
+@mcp.tool()
+def strings_find_tlds(
+    min_length: int = 3,
+    max_length: int = 8,
+    include_encrypted: bool = True,
+    common_tlds: Optional[List[str]] = None,
+    port: Optional[int] = None
+) -> dict:
+    """Locate TLD strings (plain or encrypted) within the current program."""
+    try:
+        resolved_port = _get_instance_port(port)
+        tld_catalog = common_tlds or [
+            ".com", ".net", ".org", ".biz", ".info", ".ru", ".cc", ".eu", ".pw", ".top", ".xyz",
+        ]
+
+        plain_matches: List[dict] = []
+        plain_seen: set[tuple] = set()
+        strings_resp = data_list_strings(limit=5000, port=resolved_port)
+        strings_ok = isinstance(strings_resp, dict) and strings_resp.get("success")
+
+        if strings_ok:
+            for item in strings_resp.get("result", []) if isinstance(strings_resp.get("result"), list) else []:
+                value = _extract_string_value_from_item(item)
+                if not value:
+                    continue
+                lower_val = value.lower()
+                for tld in tld_catalog:
+                    if len(tld) < min_length or len(tld) > max_length:
+                        continue
+                    if lower_val.endswith(tld):
+                        address = _extract_string_address_from_item(item)
+                        key = (lower_val, address, tld)
+                        if key in plain_seen:
+                            continue
+                        plain_seen.add(key)
+                        plain_matches.append({
+                            "value": value,
+                            "tld": tld,
+                            "address": address,
+                            "source": "defined_string",
+                        })
+
+        encrypted_candidates: List[dict] = []
+        if include_encrypted:
+            decrypt_candidates = _compute_string_decryptor_candidates(resolved_port, min_xrefs=2, check_signature=False)
+            decrypt_candidates = decrypt_candidates[:3]
+            pointer_seen: set[str] = set()
+            for candidate in decrypt_candidates:
+                decrypt_name = candidate.get("name")
+                decrypt_addr = _normalize_address(candidate.get("address"))
+                if not decrypt_name or decrypt_addr is None:
+                    continue
+                call_args = _gather_decrypt_call_arguments(resolved_port, decrypt_name, decrypt_addr, max_sites=12)
+                for pointer_info in call_args:
+                    pointer = pointer_info.get("pointer")
+                    if not isinstance(pointer, str) or pointer in pointer_seen:
+                        continue
+                    pointer_seen.add(pointer)
+                    mem_resp = memory_read_range(address=pointer, length=32, format="base64", port=resolved_port)
+                    cipher_preview = None
+                    plaintext_guess = None
+                    guess_method = None
+                    matched_tlds: Optional[List[str]] = None
+                    if isinstance(mem_resp, dict) and mem_resp.get("success"):
+                        raw_b64 = mem_resp.get("rawBytes")
+                        if isinstance(raw_b64, str):
+                            try:
+                                cipher_bytes = base64.b64decode(raw_b64)
+                            except Exception:
+                                cipher_bytes = b""
+                            if cipher_bytes:
+                                cipher_preview = cipher_bytes[:16].hex().upper()
+                                guess = _maybe_simple_xor_decode(cipher_bytes)
+                                if guess:
+                                    plaintext_guess, guess_method = guess
+                                    matched = [tld for tld in tld_catalog if tld in plaintext_guess.lower()]
+                                    if matched:
+                                        matched_tlds = matched
+
+                    candidate_entry = {
+                        "pointer": pointer,
+                        "callsite": pointer_info.get("callsite"),
+                        "caller": pointer_info.get("caller"),
+                        "decryptor": decrypt_name,
+                        "decryptor_confidence": candidate.get("confidence"),
+                        "cipher_preview": cipher_preview,
+                    }
+                    if plaintext_guess:
+                        candidate_entry["plaintext_guess"] = plaintext_guess
+                        candidate_entry["guess_method"] = guess_method
+                    if matched_tlds:
+                        candidate_entry["matched_tlds"] = matched_tlds
+                    encrypted_candidates.append(candidate_entry)
+
+        unique_tlds = sorted({entry["tld"] for entry in plain_matches})
+        result = {
+            "success": True,
+            "tlds": plain_matches,
+            "unique_tlds": unique_tlds,
+            "encrypted_candidates": encrypted_candidates,
+            "count": len(plain_matches),
+            "timestamp": int(time.time() * 1000),
+        }
+        if not plain_matches:
+            result.setdefault("warnings", []).append("No plaintext TLD strings identified in current string table")
+        if include_encrypted and not encrypted_candidates:
+            result.setdefault("warnings", []).append("No encrypted TLD candidates recovered from decryptor heuristics")
+        if not strings_ok:
+            result.setdefault("warnings", []).append("String table enumeration failed; relying solely on encrypted heuristics")
+        return result
+    except Exception as exc:
+        return {
+            "success": False,
+            "error": {
+                "code": "TLD_SEARCH_ERROR",
+                "message": str(exc),
+            },
+            "timestamp": int(time.time() * 1000),
+        }
+
+    @mcp.tool()
+    def functions_decrypt_string_calls(
+        name: Optional[str] = None,
+        address: Optional[str] = None,
+        pointer_arg_index: Optional[int] = None,
+        max_sites: int = 40,
+        max_read_bytes: int = 96,
+        port: Optional[int] = None,
+    ) -> dict:
+        """Preview pointer arguments passed to a decryptor and attempt simple plaintext guesses."""
+        if not name and not address:
+            return {
+                "success": False,
+                "error": {
+                    "code": "MISSING_PARAMETER",
+                    "message": "Provide function name or address"
+                },
+                "timestamp": int(time.time() * 1000),
+            }
+
+        try:
+            resolved_port = _get_instance_port(port)
+            identity = _resolve_function_identity(resolved_port, name=name, address=address)
+            if not identity:
+                return {
+                    "success": False,
+                    "error": {
+                        "code": "FUNCTION_RESOLUTION_FAILED",
+                        "message": "Unable to resolve decryptor function"
+                    },
+                    "timestamp": int(time.time() * 1000),
+                }
+
+            decrypt_addr, decrypt_name = identity
+            sites = max(1, min(200, int(max_sites or 0) or 40))
+            call_args = _gather_decrypt_call_arguments(
+                resolved_port,
+                decrypt_name,
+                decrypt_addr,
+                max_sites=sites,
+            )
+
+            if pointer_arg_index is not None:
+                try:
+                    idx = int(pointer_arg_index)
+                except Exception:
+                    idx = None
+                if idx is not None:
+                    call_args = [entry for entry in call_args if entry.get("arg_index") == idx]
+
+            if not call_args:
+                return {
+                    "success": True,
+                    "decryptor": {
+                        "name": decrypt_name,
+                        "address": f"0x{decrypt_addr}",
+                    },
+                    "call_sites": [],
+                    "statistics": {
+                        "analyzed_call_sites": 0,
+                        "unique_pointers": 0,
+                    },
+                    "warnings": ["No pointer arguments recovered for decryptor"],
+                    "timestamp": int(time.time() * 1000),
+                }
+
+            pointer_cache: Dict[str, dict] = {}
+            call_entries: List[dict] = []
+            unique_pointers: set[str] = set()
+            guess_hits = 0
+
+            for entry in call_args:
+                pointer = entry.get("pointer")
+                if not isinstance(pointer, str):
+                    continue
+                unique_pointers.add(pointer)
+                analysis = pointer_cache.get(pointer)
+                if analysis is None:
+                    analysis = _analyze_decrypt_pointer(resolved_port, pointer, max_read_bytes)
+                    pointer_cache[pointer] = analysis
+                if analysis.get("plaintext_guess"):
+                    guess_hits += 1
+
+                call_entries.append({
+                    "caller": entry.get("caller"),
+                    "caller_address": entry.get("caller_address"),
+                    "callsite": entry.get("callsite"),
+                    "arg_index": entry.get("arg_index"),
+                    "pointer": pointer,
+                    "analysis": analysis,
+                })
+
+            statistics = {
+                "analyzed_call_sites": len(call_entries),
+                "unique_pointers": len(unique_pointers),
+                "plaintext_guesses": guess_hits,
+            }
+
+            return {
+                "success": True,
+                "decryptor": {
+                    "name": decrypt_name,
+                    "address": f"0x{decrypt_addr}",
+                },
+                "call_sites": call_entries,
+                "statistics": statistics,
+                "timestamp": int(time.time() * 1000),
+            }
+        except Exception as exc:
+            return {
+                "success": False,
+                "error": {
+                    "code": "DECRYPT_CALL_ANALYSIS_ERROR",
+                    "message": str(exc),
+                },
+                "timestamp": int(time.time() * 1000),
+            }
+
+
+    @mcp.tool()
+    def functions_trace_decryptor_consumers(
+        name: Optional[str] = None,
+        address: Optional[str] = None,
+        max_callers: int = 40,
+        pointer_arg_index: Optional[int] = None,
+        include_call_args: bool = True,
+        include_upstream: bool = False,
+        port: Optional[int] = None,
+    ) -> dict:
+        """Trace call relationships for a decryptor and summarize consumer functions."""
+        if not name and not address:
+            return {
+                "success": False,
+                "error": {
+                    "code": "MISSING_PARAMETER",
+                    "message": "Provide function name or address"
+                },
+                "timestamp": int(time.time() * 1000),
+            }
+
+        try:
+            resolved_port = _get_instance_port(port)
+            identity = _resolve_function_identity(resolved_port, name=name, address=address)
+            if not identity:
+                return {
+                    "success": False,
+                    "error": {
+                        "code": "FUNCTION_RESOLUTION_FAILED",
+                        "message": "Unable to resolve decryptor function"
+                    },
+                    "timestamp": int(time.time() * 1000),
+                }
+
+            decrypt_addr, decrypt_name = identity
+            xref_entries = _extract_xref_entries(
+                xrefs_list(to_addr=f"0x{decrypt_addr}", type="CALL", port=resolved_port)
+            )
+
+            if not xref_entries:
+                return {
+                    "success": True,
+                    "decryptor": {
+                        "name": decrypt_name,
+                        "address": f"0x{decrypt_addr}",
+                    },
+                    "callers": [],
+                    "statistics": {
+                        "caller_count": 0,
+                        "callsite_count": 0,
+                        "pointer_entries": 0,
+                    },
+                    "warnings": ["No CALL xrefs located for decryptor"],
+                    "timestamp": int(time.time() * 1000),
+                }
+
+            caller_map: Dict[str, dict] = {}
+            for entry in xref_entries:
+                call_addr = _normalize_address(
+                    entry.get("from_address")
+                    or entry.get("fromAddress")
+                    or entry.get("from")
+                )
+                parent_addr = _normalize_address(
+                    entry.get("function_address")
+                    or entry.get("functionAddress")
+                )
+                parent_name = entry.get("functionName") or entry.get("fromFunction") or entry.get("parentFunction")
+
+                if not parent_name and parent_addr:
+                    try:
+                        info = functions_get(address=f"0x{parent_addr}", port=resolved_port)
+                    except Exception:
+                        info = None
+                    if isinstance(info, dict) and info.get("success"):
+                        result = info.get("result")
+                        if isinstance(result, dict):
+                            parent_name = result.get("name")
+
+                if not parent_name and parent_addr:
+                    parent_name = f"FUN_{parent_addr}"
+                if not parent_name:
+                    continue
+
+                entry_key = parent_name
+                holder = caller_map.setdefault(entry_key, {
+                    "name": parent_name,
+                    "address": f"0x{parent_addr}" if parent_addr else None,
+                    "call_sites": set(),
+                })
+                if call_addr:
+                    holder["call_sites"].add(f"0x{call_addr}")
+
+            if not caller_map:
+                return {
+                    "success": True,
+                    "decryptor": {
+                        "name": decrypt_name,
+                        "address": f"0x{decrypt_addr}",
+                    },
+                    "callers": [],
+                    "statistics": {
+                        "caller_count": 0,
+                        "callsite_count": 0,
+                        "pointer_entries": 0,
+                    },
+                    "warnings": ["Xref enumeration returned no callable parents"],
+                    "timestamp": int(time.time() * 1000),
+                }
+
+            pointer_entries = _gather_decrypt_call_arguments(
+                resolved_port,
+                decrypt_name,
+                decrypt_addr,
+                max_sites=max(1, min(200, (int(max_callers or 0) or 40) * 6)),
+            )
+            if pointer_arg_index is not None:
+                try:
+                    idx = int(pointer_arg_index)
+                except Exception:
+                    idx = None
+                if idx is not None:
+                    pointer_entries = [p for p in pointer_entries if p.get("arg_index") == idx]
+
+            pointers_by_caller: Dict[str, List[dict]] = {}
+            for ptr in pointer_entries:
+                caller_name = ptr.get("caller")
+                if not caller_name or caller_name not in caller_map:
+                    continue
+                pointers_by_caller.setdefault(caller_name, []).append(ptr)
+
+            caller_items = list(caller_map.values())
+            caller_items.sort(key=lambda item: len(item.get("call_sites", [])), reverse=True)
+            caller_items = caller_items[: max(1, min(200, int(max_callers or 0) or 40))]
+
+            caller_results: List[dict] = []
+            total_callsites = 0
+            total_pointer_entries = 0
+
+            for caller in caller_items:
+                call_sites = sorted(caller.get("call_sites", []))
+                total_callsites += len(call_sites)
+
+                result_entry = {
+                    "name": caller.get("name"),
+                    "address": caller.get("address"),
+                    "callsite_count": len(call_sites),
+                    "call_sites": call_sites,
+                }
+
+                pointer_list = pointers_by_caller.get(caller.get("name"), [])
+                if pointer_list:
+                    total_pointer_entries += len(pointer_list)
+                    result_entry["pointer_arguments"] = pointer_list
+
+                if include_call_args:
+                    try:
+                        call_args_result = functions_list_call_args(
+                            name=caller.get("name"),
+                            callee=decrypt_name,
+                            port=resolved_port,
+                        )
+                    except Exception as exc:
+                        call_args_result = {
+                            "success": False,
+                            "error": {
+                                "code": "CALL_ARGS_ERROR",
+                                "message": str(exc),
+                            },
+                        }
+
+                    if isinstance(call_args_result, dict) and call_args_result.get("success"):
+                        result_entry["call_argument_summary"] = {
+                            "matches": call_args_result.get("calls", []),
+                            "unique_values": call_args_result.get("values_hex", []),
+                        }
+                    else:
+                        result_entry.setdefault("warnings", []).append("Failed to enumerate call arguments")
+
+                if include_upstream and caller.get("address"):
+                    parent_entries = _extract_xref_entries(
+                        xrefs_list(to_addr=caller.get("address"), type="CALL", port=resolved_port)
+                    )
+                    upstream: List[str] = []
+                    for parent in parent_entries:
+                        upstream_name = parent.get("functionName") or parent.get("fromFunction") or parent.get("parentFunction")
+                        if not upstream_name:
+                            upstream_addr = _normalize_address(parent.get("function_address") or parent.get("functionAddress"))
+                            if upstream_addr:
+                                upstream_name = f"FUN_{upstream_addr}"
+                        if upstream_name and upstream_name not in upstream:
+                            upstream.append(upstream_name)
+                        if len(upstream) >= 12:
+                            break
+                    if upstream:
+                        result_entry["upstream_callers"] = upstream
+
+                caller_results.append(result_entry)
+
+            statistics = {
+                "caller_count": len(caller_results),
+                "callsite_count": total_callsites,
+                "pointer_entries": total_pointer_entries,
+            }
+
+            return {
+                "success": True,
+                "decryptor": {
+                    "name": decrypt_name,
+                    "address": f"0x{decrypt_addr}",
+                },
+                "callers": caller_results,
+                "statistics": statistics,
+                "timestamp": int(time.time() * 1000),
+            }
+        except Exception as exc:
+            return {
+                "success": False,
+                "error": {
+                    "code": "DECRYPT_CONSUMER_TRACE_ERROR",
+                    "message": str(exc),
+                },
+                "timestamp": int(time.time() * 1000),
+            }
+
+
+        port = _get_instance_port(port)
+        mode = mode.lower().strip()
+        
+        if mode not in ["summary", "detail"]:
+            return {"success": False, "error": {"code": "INVALID_MODE", "message": "Mode must be 'summary' or 'detail'"}}
+        
+        # Validate confidence threshold
+        min_confidence = max(0.0, min(1.0, float(min_confidence)))
+        max_results = max(1, min(1000, int(max_results)))
+        
+        if mode == "summary":
+            return _analyze_hash_arrays_summary(
+                start_address, end_address, section_name, min_confidence, max_results, port
+            )
+        else:  # detail mode
+            return _analyze_hash_arrays_detail(
+                start_address, end_address, address_range, min_confidence, max_results, port
+            )
+
 @mcp.tool()
 def memory_analyze_hash_arrays(
     start_address: Optional[str] = None,
@@ -2872,6 +4492,59 @@ def functions_create(address: str, port: Optional[int] = None) -> dict:
     return simplified
 
 @mcp.tool()
+def program_set_image_base(
+    image_base: str,
+    port: Optional[int] = None,
+) -> dict:
+    """Set the image base address of the current program.
+    
+    This modifies the base address used for all address calculations in the program.
+    Use with caution as it affects all address references.
+    
+    Args:
+        image_base: New image base address in hex format (e.g., "0x10000000" or "10000000")
+        port: Specific Ghidra instance port (optional, uses current if omitted)
+        
+    Returns:
+        dict: Operation result with updated program information including:
+            - name: Program name
+            - imageBase: New image base address
+            - minAddress: Program minimum address
+            - maxAddress: Program maximum address
+    """
+    if not image_base:
+        return {
+            "success": False,
+            "error": {
+                "code": "MISSING_PARAMETER",
+                "message": "image_base parameter is required"
+            },
+            "timestamp": int(time.time() * 1000)
+        }
+    
+    port = _get_instance_port(port)
+    
+    # Normalize address format
+    addr_str = image_base.strip()
+    if not addr_str.startswith("0x") and not addr_str.startswith("0X"):
+        # Try to interpret as hex if it looks like hex
+        try:
+            int(addr_str, 16)
+            addr_str = "0x" + addr_str
+        except ValueError:
+            pass
+    
+    payload = {"imageBase": addr_str}
+    
+    response = safe_patch(port, "program", payload)
+    
+    # Clear the cached base address since we just changed it
+    if port in _program_base_cache:
+        del _program_base_cache[port]
+    
+    return simplify_response(response)
+
+@mcp.tool()
 def functions_rename(
     old_name: Optional[str] = None,
     name: Optional[str] = None,  # alias for old_name for broader compatibility
@@ -3022,7 +4695,7 @@ def datatypes_create_enum(name: str, size_bits: int = 32, category: str = "/Auto
     """Create (or replace) an Enum DataType in the program DataTypeManager.
 
     Returns: { success, name, size_bits, category }
-    Note: Requires plugin endpoint 'datatypes/enum/create'.
+    Note: Requires plugin endpoint 'datatypes/enums/create'.
     """
     if not name:
         return {"success": False, "error": {"code": "MISSING_PARAMETER", "message": "name is required"}}
@@ -3034,27 +4707,20 @@ def datatypes_create_enum(name: str, size_bits: int = 32, category: str = "/Auto
             existing = safe_get(p, "datatypes/enums")
             if isinstance(existing, dict) and existing.get("success") and isinstance(existing.get("result"), list):
                 if any(str(e.get("name")) == name for e in existing.get("result") or []):
-                    return {"success": True, "result": {"name": name, "present": True, "created": False}}
+                    return {"success": True, "name": name, "size_bits": size_bits, "category": category, "existed": True}
         except Exception:
             pass
 
     payload = {"name": name, "size_bits": int(size_bits), "category": category, "replace": bool(replace)}
 
-    # Try known/likely routes in order
+    # POST Changes
     routes = [
-        ("POST", "datatypes/enum/create"),
-        ("PUT", "datatypes/enum/create"),
-        ("POST", f"datatypes/enums/{quote(name)}"),
-        ("PUT", f"datatypes/enums/{quote(name)}"),
-        ("POST", f"datatypes/enum/{quote(name)}"),
-        ("PUT", f"datatypes/enum/{quote(name)}"),
-        ("POST", "programs/current/datatypes/enum/create"),
-        ("PUT", "programs/current/datatypes/enum/create"),
+        ("POST", "datatypes/enums/create"),
     ]
 
     last = None
     for method, path in routes:
-        last = safe_post(p, path, payload) if method == "POST" else safe_put(p, path, payload)
+        last = safe_post(p, path, payload)  # Only POST
         try:
             if isinstance(last, dict) and last.get("success"):
                 return simplify_response(last)
@@ -3062,7 +4728,7 @@ def datatypes_create_enum(name: str, size_bits: int = 32, category: str = "/Auto
             if isinstance(last, dict) and isinstance(last.get("error"), dict):
                 code = str(last.get("error", {}).get("code"))
                 if code and code.upper() in ("ENUM_EXISTS", "ALREADY_EXISTS"):
-                    return {"success": True, "result": {"name": name, "present": True, "created": False}, "note": code}
+                    return {"success": True, "name": name, "size_bits": size_bits, "category": category, "existed": True}
         except Exception:
             pass
 
@@ -3073,26 +4739,22 @@ def datatypes_add_enum_constants(enum_name: str, items: List[dict], port: Option
     """Add constants to an existing Enum DataType.
 
     items: [ { name: string, value: string|int } ]
-    Note: Requires plugin endpoint 'datatypes/enum/constants'.
+    Note: Requires plugin endpoint 'datatypes/enums/{enumName}/constants'.
     """
     if not enum_name:
         return {"success": False, "error": {"code": "MISSING_PARAMETER", "message": "enum_name is required"}}
     if not isinstance(items, list) or not items:
         return {"success": False, "error": {"code": "MISSING_PARAMETER", "message": "items must be a non-empty list"}}
     p = _get_instance_port(port)
-    payload = {"enum_name": enum_name, "items": items}
 
-    # Try common endpoint shapes for adding constants
+    # POST the enums
     routes = [
-        ("POST", "datatypes/enum/constants", payload),
-        ("POST", f"datatypes/enums/{quote(enum_name)}/constants", {"items": items}),
-        ("POST", f"datatypes/enum/{quote(enum_name)}/constants", {"items": items}),
-        ("PUT", f"datatypes/enums/{quote(enum_name)}/constants", {"items": items}),
+        ("POST", f"datatypes/enums/{quote(enum_name)}/constants", {"items": items}),  # Primary and only route
     ]
 
     last = None
     for method, path, body in routes:
-        last = safe_post(p, path, body) if method == "POST" else safe_put(p, path, body)
+        last = safe_post(p, path, body)  # Only POST, no PUT
         try:
             if isinstance(last, dict) and last.get("success"):
                 return simplify_response(last)
@@ -3983,42 +5645,59 @@ def imports_apply_from_hashdb(
         authoritative=authoritative,
         port=p,
     )
+    
+    # Return concise summary to avoid exceeding model context window with large mappings
+    observed_modules_count = len([m for m in mappings if m.get("type") == "module" and m.get("value") in mods_set])
+    observed_apis_count = len([m for m in mappings if m.get("type") == "api" and m.get("value") in apis_set])
+    preloaded_modules_count = len([m for m in mappings if m.get("type") == "module" and m.get("value") not in mods_set])
+    preloaded_apis_count = len([m for m in mappings if m.get("type") == "api" and m.get("value") not in apis_set])
+    
     out = {
-        "success": True, 
-        "applied": apply_res, 
-        "observed": {
-            "modules": sorted(list(mods_set)), 
-            "apis": sorted(list(apis_set))
+        "success": True,
+        "summary": f"Applied {len(mappings)} hash mappings to Ghidra enums",
+        "counts": {
+            "total_mappings": len(mappings),
+            "modules_total": len([m for m in mappings if m.get("type") == "module"]),
+            "apis_total": len([m for m in mappings if m.get("type") == "api"]),
+            "observed_modules": observed_modules_count,
+            "observed_apis": observed_apis_count,
+            "preloaded_modules": preloaded_modules_count,
+            "preloaded_apis": preloaded_apis_count,
         },
-        "mappings_created": {
-            "total": len(mappings),
-            "modules": len([m for m in mappings if m.get("type") == "module"]),
-            "apis": len([m for m in mappings if m.get("type") == "api"]),
-            "observed_modules": len([m for m in mappings if m.get("type") == "module" and m.get("value") in mods_set]),
-            "observed_apis": len([m for m in mappings if m.get("type") == "api" and m.get("value") in apis_set]),
-            "preloaded_modules": len([m for m in mappings if m.get("type") == "module" and m.get("value") not in mods_set]),
-            "preloaded_apis": len([m for m in mappings if m.get("type") == "api" and m.get("value") not in apis_set]),
-            "details": mappings
+        "enums": {
+            "api_enum": api_enum_name,
+            "module_enum": module_enum_name
         },
-        "preload_stats": preload_stats
+        "resolver": {
+            "renamed": bool(rename_resolver_to),
+            "new_name": rename_resolver_to if rename_resolver_to else callee_name
+        },
+        "preload_stats": {
+            "enabled": preload_stats["enabled"],
+            "modules_successful": preload_stats["modules_successful"],
+            "modules_requested": preload_stats["modules_requested"],
+            "total_apis_fetched": preload_stats["total_apis_fetched"],
+            "failed_count": len(preload_stats["failed_modules"])
+        }
     }
-    # If any obvious mismatch (e.g., empty members), surface warning
+    
+    # Add warnings if present
     if isinstance(apply_res, dict) and apply_res.get("warnings"):
         out["warnings"] = apply_res["warnings"]
     
-    # Add summary message about preloading
-    if preload_stats["enabled"]:
-        summary_parts = []
-        if preload_stats["modules_successful"] > 0:
-            summary_parts.append(
-                f"Successfully preloaded {preload_stats['total_apis_fetched']} API hashes "
-                f"from {preload_stats['modules_successful']}/{preload_stats['modules_requested']} modules"
-            )
-        if preload_stats["failed_modules"]:
-            summary_parts.append(f"Failed to load: {', '.join(preload_stats['failed_modules'][:3])}")
-        
-        if summary_parts:
-            out.setdefault("info", []).extend(summary_parts)
+    # Add informational summary message
+    summary_parts = [f"Successfully applied {len(mappings)} hash mappings"]
+    if observed_modules_count > 0:
+        summary_parts.append(f"{observed_modules_count} observed module(s)")
+    if observed_apis_count > 0:
+        summary_parts.append(f"{observed_apis_count} observed API(s)")
+    if preload_stats["enabled"] and preload_stats["total_apis_fetched"] > 0:
+        summary_parts.append(
+            f"preloaded {preload_stats['total_apis_fetched']} API hashes from "
+            f"{preload_stats['modules_successful']} module(s)"
+        )
+    
+    out["details"] = " + ".join(summary_parts)
     
     return out
 
@@ -4508,8 +6187,8 @@ def analysis_identify_resolvers(
                 call_xrefs = []
                 
                 if isinstance(xrefs_data, dict):
-                    xrefs_list_data = xrefs_data.get("xrefs", [])
-                    call_xrefs = [x for x in xrefs_list_data if isinstance(x, dict) and x.get("type") == "CALL"]
+                    xrefs_list_data = xrefs_data.get("references") or xrefs_data.get("xrefs", [])
+                    call_xrefs = [x for x in xrefs_list_data if isinstance(x, dict) and (x.get("refType") == "UNCONDITIONAL_CALL" or x.get("type") == "CALL" or "CALL" in str(x.get("refType", "")))]
                 
                 call_count = len(call_xrefs)
                 
@@ -4928,10 +6607,10 @@ def analysis_auto_detect_obfuscation(
                     if isinstance(xrefs_result, dict) and xrefs_result.get("success"):
                         xrefs_data = xrefs_result.get("result", {})
                     if isinstance(xrefs_data, dict):
-                        xrefs_list_data = xrefs_data.get("xrefs", [])
+                        xrefs_list_data = xrefs_data.get("references") or xrefs_data.get("xrefs", [])
                         
                         for xref in xrefs_list_data[:5]:  # Limit analysis
-                            if not isinstance(xref, dict) or xref.get("type") != "CALL":
+                            if not isinstance(xref, dict) or not (xref.get("refType") == "UNCONDITIONAL_CALL" or xref.get("type") == "CALL" or "CALL" in str(xref.get("refType", ""))):
                                 continue
                             
                             caller_addr = xref.get("from_address", "")
@@ -5357,10 +7036,10 @@ def analysis_trace_function_dependencies(
             if isinstance(xrefs_result, dict) and xrefs_result.get("success"):
                 xrefs_data = xrefs_result.get("result", {})
             if isinstance(xrefs_data, dict):
-                xrefs_list_data = xrefs_data.get("xrefs", [])
+                xrefs_list_data = xrefs_data.get("references") or xrefs_data.get("xrefs", [])
                 
                 for xref in xrefs_list_data:
-                    if isinstance(xref, dict) and xref.get("type") == "CALL":
+                    if isinstance(xref, dict) and (xref.get("refType") == "UNCONDITIONAL_CALL" or xref.get("type") == "CALL" or "CALL" in str(xref.get("refType", ""))):
                         caller_addr = xref.get("from_address", "")
                         if caller_addr:
                             # Get the function containing this address
@@ -5464,14 +7143,14 @@ def analysis_trace_function_dependencies(
 @mcp.tool()
 def analysis_find_related_functions(
     target_function: str,
-    relationship_types: Optional[List[str]] = None,
+    relationship_types: Optional[str] = None,
     port: Optional[int] = None
 ) -> dict:
     """Find functions related to a target function through various relationships.
     
     Args:
         target_function: Function name or address to find relationships for
-        relationship_types: Types of relationships to find (calls, xrefs, shared_data, similar_names)
+        relationship_types: Comma-separated types of relationships to find (e.g., "calls,xrefs,shared_data,similar_names")
         port: Specific Ghidra instance port (optional)
         
     Returns:
@@ -5488,8 +7167,14 @@ def analysis_find_related_functions(
     """
     port = _get_instance_port(port)
     
+    # Parse relationship_types from comma-separated string to list
     if relationship_types is None:
-        relationship_types = ["calls", "xrefs", "shared_data", "similar_names"]
+        relationship_types_list = ["calls", "xrefs", "shared_data", "similar_names"]
+    elif isinstance(relationship_types, str):
+        relationship_types_list = [t.strip() for t in relationship_types.split(",") if t.strip()]
+    else:
+        # Fallback for backwards compatibility if somehow a list is passed
+        relationship_types_list = relationship_types if isinstance(relationship_types, list) else ["calls", "xrefs"]
     
     try:
         relationships = {
@@ -5501,7 +7186,7 @@ def analysis_find_related_functions(
         }
         
         # Find direct call relationships
-        if "calls" in relationship_types or "xrefs" in relationship_types:
+        if "calls" in relationship_types_list or "xrefs" in relationship_types_list:
             # Functions this target calls
             call_args_result = functions_list_call_args(name=target_function, port=port)
             if isinstance(call_args_result, dict) and call_args_result.get("success"):
@@ -5528,10 +7213,10 @@ def analysis_find_related_functions(
                 if isinstance(xrefs_result, dict) and xrefs_result.get("success"):
                     xrefs_data = xrefs_result.get("result", {})
                 if isinstance(xrefs_data, dict):
-                    xrefs_list_data = xrefs_data.get("xrefs", [])
+                    xrefs_list_data = xrefs_data.get("references") or xrefs_data.get("xrefs", [])
                     
                     for xref in xrefs_list_data:
-                        if isinstance(xref, dict) and xref.get("type") == "CALL":
+                        if isinstance(xref, dict) and (xref.get("refType") == "UNCONDITIONAL_CALL" or xref.get("type") == "CALL" or "CALL" in str(xref.get("refType", ""))):
                             caller_addr = xref.get("from_address", "")
                             if caller_addr:
                                 caller_func = functions_get(address=caller_addr, port=port)
@@ -5542,7 +7227,7 @@ def analysis_find_related_functions(
                                         relationships["called_by"].append(caller_name)
         
         # Find functions with shared constants (potential XOR keys, hash values)
-        if "shared_data" in relationship_types:
+        if "shared_data" in relationship_types_list:
             target_constants = set()
             
             # Get constants from target function
@@ -5568,7 +7253,7 @@ def analysis_find_related_functions(
                             })
         
         # Find functions with similar names (might be part of same module)
-        if "similar_names" in relationship_types:
+        if "similar_names" in relationship_types_list:
             functions_result = functions_list(port=port, limit=1000)
             if isinstance(functions_result, dict) and functions_result.get("success"):
                 functions_data = functions_result.get("result", {})
@@ -7051,6 +8736,80 @@ def sections_list(port: Optional[int] = None) -> dict:
             "timestamp": int(time.time() * 1000)
         }
     return {"success": False, "error": {"code": "NO_SECTIONS", "message": "No sections information available"}, "timestamp": int(time.time() * 1000)}
+
+@mcp.tool()
+def segments_list(offset: int = 0, limit: int = 100, port: Optional[int] = None) -> dict:
+    """List memory segments with start/end addresses, sizes, and permissions.
+    
+    This calls the Ghidra HATEOAS /segments endpoint to retrieve segment information
+    including readable, writable, executable, and initialized flags.
+    
+    Args:
+        offset: Pagination offset (default: 0)
+        limit: Maximum number of segments to return (default: 100)
+        port: Specific Ghidra instance port (optional)
+    
+    Returns:
+        dict: {
+            success: bool,
+            segments: [
+                {
+                    name: str,
+                    start: str (hex address),
+                    end: str (hex address),
+                    size: int,
+                    readable: bool,
+                    writable: bool,
+                    executable: bool,
+                    initialized: bool
+                }
+            ],
+            count: int,
+            offset: int,
+            limit: int
+        }
+    """
+    port = _get_instance_port(port)
+    
+    params: Dict[str, Any] = {
+        "offset": offset,
+        "limit": limit
+    }
+    
+    response = safe_get(port, "segments", params)
+    simplified = simplify_response(response)
+    
+    # Reformat to be more agent-friendly
+    if isinstance(simplified, dict) and simplified.get("success"):
+        result = simplified.get("result", [])
+        if isinstance(result, list):
+            segments = []
+            for seg in result:
+                if isinstance(seg, dict):
+                    # Extract key fields
+                    segment_info = {
+                        "name": seg.get("name", ""),
+                        "start": seg.get("start", ""),
+                        "end": seg.get("end", ""),
+                        "size": seg.get("size", 0),
+                        "readable": seg.get("readable", False),
+                        "writable": seg.get("writable", False),
+                        "executable": seg.get("executable", False),
+                        "initialized": seg.get("initialized", False)
+                    }
+                    segments.append(segment_info)
+            
+            return {
+                "success": True,
+                "segments": segments,
+                "count": len(segments),
+                "offset": simplified.get("offset", offset),
+                "limit": simplified.get("limit", limit),
+                "timestamp": simplified.get("timestamp", int(time.time() * 1000))
+            }
+    
+    return simplified
+
 
 @mcp.tool()
 def section_read_by_name(section_name: str, format: str = "base64", port: Optional[int] = None) -> dict:

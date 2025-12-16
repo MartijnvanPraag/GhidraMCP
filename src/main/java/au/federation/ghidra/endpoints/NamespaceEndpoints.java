@@ -15,20 +15,8 @@ package au.federation.ghidra.endpoints;
 
     public class NamespaceEndpoints extends AbstractEndpoint {
 
-        private PluginTool tool;
-        
-        public NamespaceEndpoints(Program program, int port) {
-            super(program, port);
-        }
-        
-        public NamespaceEndpoints(Program program, int port, PluginTool tool) {
-            super(program, port);
-            this.tool = tool;
-        }
-        
-        @Override
-        protected PluginTool getTool() {
-            return tool;
+        public NamespaceEndpoints(au.federation.ghidra.PluginState pluginState) {
+            super(pluginState);
         }
 
         @Override
@@ -61,7 +49,7 @@ package au.federation.ghidra.endpoints;
                     Collections.sort(sorted);
                     
                     // Build response with HATEOAS links
-                    au.federation.ghidra.api.ResponseBuilder builder = new au.federation.ghidra.api.ResponseBuilder(exchange, port)
+                    au.federation.ghidra.api.ResponseBuilder builder = new au.federation.ghidra.api.ResponseBuilder(exchange, getPort())
                         .success(true);
                     
                     // Apply pagination and get paginated items

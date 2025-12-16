@@ -46,7 +46,8 @@ import ghidra.util.Msg;
 public class GhidraMCPPlugin extends Plugin implements ApplicationLevelPlugin {
 
     // Made public static to be accessible by InstanceEndpoints
-    public static final Map<Integer, GhidraMCPPlugin> activeInstances = new ConcurrentHashMap<>();
+    // Using Object to support both plugin instances and potential headless instances
+    public static final Map<Integer, Object> activeInstances = new ConcurrentHashMap<>();
     private static final Object baseInstanceLock = new Object();
     
     private HttpServer server;
@@ -93,6 +94,9 @@ public class GhidraMCPPlugin extends Plugin implements ApplicationLevelPlugin {
         // Use a cached thread pool for better performance with multiple concurrent requests
         server.setExecutor(Executors.newCachedThreadPool());
 
+        // --- Create GUIPluginState for all endpoints ---
+        GUIPluginState pluginState = new GUIPluginState(this, port);
+        
         // --- Register Endpoints ---
         Program currentProgram = getCurrentProgram(); // Get program once
         
@@ -101,10 +105,10 @@ public class GhidraMCPPlugin extends Plugin implements ApplicationLevelPlugin {
         
         // Register endpoints that don't require a program
         registerProjectEndpoints(server);
-        new InstanceEndpoints(currentProgram, port, activeInstances).registerEndpoints(server);
+        new InstanceEndpoints(pluginState).registerEndpoints(server);
         
         // Register Resource Endpoints that require a program
-        registerProgramDependentEndpoints(server);
+        registerProgramDependentEndpoints(server, pluginState);
         
         // Register Root Endpoint (should be last to include links to all other endpoints)
         registerRootEndpoint(server);
@@ -124,7 +128,7 @@ public class GhidraMCPPlugin extends Plugin implements ApplicationLevelPlugin {
      * IMPORTANT: Endpoints are registered in order from most specific to least specific
      * to ensure proper URL path matching.
      */
-    private void registerProgramDependentEndpoints(HttpServer server) {
+    private void registerProgramDependentEndpoints(HttpServer server, GUIPluginState pluginState) {
         // Register all endpoints without checking for a current program
         // The endpoints will check for the current program at runtime when they're called
         Msg.info(this, "Registering program-dependent endpoints. Programs will be checked at runtime.");
@@ -132,19 +136,19 @@ public class GhidraMCPPlugin extends Plugin implements ApplicationLevelPlugin {
         Program currentProgram = getCurrentProgram();
         Msg.info(this, "Current program at registration time: " + (currentProgram != null ? currentProgram.getName() : "none"));
         
-        new FunctionEndpoints(currentProgram, port, tool).registerEndpoints(server);
-        new VariableEndpoints(currentProgram, port, tool).registerEndpoints(server);
-        new ClassEndpoints(currentProgram, port, tool).registerEndpoints(server);
-        new SegmentEndpoints(currentProgram, port, tool).registerEndpoints(server);
-        new SymbolEndpoints(currentProgram, port, tool).registerEndpoints(server);
-        new NamespaceEndpoints(currentProgram, port, tool).registerEndpoints(server);
-        new DataEndpoints(currentProgram, port, tool).registerEndpoints(server);
-        new MemoryEndpoints(currentProgram, port, tool).registerEndpoints(server);
-        new XrefsEndpoints(currentProgram, port, tool).registerEndpoints(server);
-        new AnalysisEndpoints(currentProgram, port, tool).registerEndpoints(server);
-        new ProgramEndpoints(currentProgram, port, tool).registerEndpoints(server);
-    new DataTypeEndpoints(currentProgram, port, tool).registerEndpoints(server);
-    new EquateEndpoints(currentProgram, port, tool).registerEndpoints(server);
+        new FunctionEndpoints(pluginState).registerEndpoints(server);
+        new VariableEndpoints(pluginState).registerEndpoints(server);
+        new ClassEndpoints(pluginState).registerEndpoints(server);
+        new SegmentEndpoints(pluginState).registerEndpoints(server);
+        new SymbolEndpoints(pluginState).registerEndpoints(server);
+        new NamespaceEndpoints(pluginState).registerEndpoints(server);
+        new DataEndpoints(pluginState).registerEndpoints(server);
+        new MemoryEndpoints(pluginState).registerEndpoints(server);
+        new XrefsEndpoints(pluginState).registerEndpoints(server);
+        new AnalysisEndpoints(pluginState).registerEndpoints(server);
+        new ProgramEndpoints(pluginState).registerEndpoints(server);
+        new DataTypeEndpoints(pluginState).registerEndpoints(server);
+        new EquateEndpoints(pluginState).registerEndpoints(server);
         
         Msg.info(this, "Registered program-dependent endpoints. Programs will be checked at runtime.");
     }
